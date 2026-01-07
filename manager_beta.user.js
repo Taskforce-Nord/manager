@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         B&M Scriptmanager (V21 - Solid Blue & Squeezed Tabs)
+// @name         B&M Scriptmanager (V25.1 - UX Fixes)
 // @namespace    https://github.com/taskforce-Nord/public
-// @version      21.0.0
-// @description  Vollflächige Farben (Blau/Rot/Grau). Tabs quetschen sich (Browser-Style). Fix für Reaktivierung.
+// @version      25.1.0
+// @description  Fix: Repo-Manager öffnet sofort. Kein Seiten-Reload mehr beim Speichern von Tokens. High-Contrast UI.
 // @author       B&M
 // @match        https://www.leitstellenspiel.de/*
 // @grant        GM_xmlhttpRequest
@@ -18,17 +18,19 @@
 (function() {
     'use strict';
 
-    // --- KONFIGURATION ---
-    const GITHUB_REPO_OWNER = 'Taskforce-Nord';
-    const GITHUB_REPO_NAME = 'public';
-    const REPO_PATH_FULL = `${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}`;
+    // --- KONFIGURATION HAUPT-REPO ---
+    const PRIMARY_REPO = {
+        owner: 'Taskforce-Nord',
+        name: 'public',
+        path: 'Taskforce-Nord/public'
+    };
 
-    const SYNC_CONFIG_FILE = 'sync_meta.json';
     const DB_NAME = 'BM-DB-TN';
     const DB_VERSION = 1;
     const DEFAULT_CATEGORY = "Sonstiges";
 
     const GM_TOKEN_KEY = "bm_access_pat";
+    const GM_CUSTOM_REPOS_KEY = "bm_custom_repos";
     const LS_ACCESS_KEY = "bm_access_cfg";
 
     // Globals
@@ -38,16 +40,15 @@
     let db;
     let managerUiCreated = false;
     let settingsModalUiCreated = false;
-    let tokenModalUiCreated = false;
+    let repoModalUiCreated = false;
 
-    // UI State
     let activeTab = 'Alle';
     let cachedScriptData = { online: [], local: [] };
 
     // --- INIT ---
     try {
         const savedPat = GM_getValue(GM_TOKEN_KEY, "");
-        if (savedPat) localStorage.setItem(LS_ACCESS_KEY, `${savedPat}@${REPO_PATH_FULL}`);
+        if (savedPat) localStorage.setItem(LS_ACCESS_KEY, `${savedPat}@${PRIMARY_REPO.path}`);
     } catch (e) {}
 
     window.BMScriptManager = {
@@ -107,10 +108,10 @@
         initSystem: async function() {
             try {
                 const token = GM_getValue(GM_TOKEN_KEY, "");
-                const access = await this._checkRepoAccess(token);
+                const access = await this._checkRepoAccess(PRIMARY_REPO.owner, PRIMARY_REPO.name, token);
 
                 if (access === 'DENIED') {
-                    console.error("[B&M] Access Denied.");
+                    console.error("[B&M] Primary Access Denied.");
                     this._showSetupScreen("Zugriff auf Haupt-Repository verweigert.<br>Bitte Token prüfen.");
                     return;
                 }
@@ -123,8 +124,8 @@
             } catch (e) { console.error("[B&M Init Error]", e); }
         },
 
-        _checkRepoAccess: function(token) {
-            const url = `https://api.github.com/repos/${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}/contents/manifest.json`;
+        _checkRepoAccess: function(owner, name, token) {
+            const url = `https://api.github.com/repos/${owner}/${name}/contents/manifest.json`;
             const headers = token ? { "Authorization": `token ${token}` } : {};
             return new Promise(resolve => {
                 GM_xmlhttpRequest({
@@ -143,13 +144,13 @@
             const checkBody = setInterval(() => {
                 if (document.body) {
                     clearInterval(checkBody);
-                    this._createTokenModalUI();
-                    const status = document.getElementById('bm-pat-status');
-                    if(status) { status.innerHTML = msg; status.style.color = '#ff4444'; }
+                    this._createRepoManagerUI();
+                    const status = document.getElementById('bm-repo-status');
+                    if(status) { status.innerHTML = msg; status.style.color = '#ff6b6b'; }
                     const btn = document.createElement('div');
                     btn.innerHTML = '⚠️ B&M Setup';
                     btn.style.cssText = 'position:fixed;bottom:10px;right:10px;z-index:99999;background:#d9534f;color:white;padding:10px;border-radius:5px;cursor:pointer;font-family:sans-serif;box-shadow:0 2px 10px rgba(0,0,0,0.5);';
-                    btn.onclick = () => this._createTokenModalUI();
+                    btn.onclick = () => this._createRepoManagerUI();
                     document.body.appendChild(btn);
                 }
             }, 100);
@@ -159,14 +160,29 @@
             if (!db) return;
             const scripts = await this.getScriptsFromDB();
             let count = 0;
+
+            const customRepos = JSON.parse(GM_getValue(GM_CUSTOM_REPOS_KEY, "[]"));
+
             for (const script of scripts.filter(s => s.isActive !== false)) {
-                const isPrimary = script.repoInfo && script.repoInfo.owner === GITHUB_REPO_OWNER && script.repoInfo.name === GITHUB_REPO_NAME;
-                if (isPrimary && !token) {
-                    script.isActive = false; script.authSuspended = true;
-                    this.saveScriptToDB(script);
-                    continue;
+                let scriptToken = null;
+                if (script.repoInfo && script.repoInfo.owner === PRIMARY_REPO.owner && script.repoInfo.name === PRIMARY_REPO.name) {
+                    scriptToken = token;
+                } else if (script.repoInfo) {
+                    const cr = customRepos.find(r => r.owner === script.repoInfo.owner && r.name === script.repoInfo.name);
+                    if(cr) scriptToken = cr.token;
                 }
+
+                if (script.repoInfo && !scriptToken) {
+                     if ((script.repoInfo.owner === PRIMARY_REPO.owner && script.repoInfo.name === PRIMARY_REPO.name) || (script.repoInfo.tokenNeeded)) {
+                         console.warn(`[B&M] Blocked '${script.name}': Missing Token.`);
+                         script.isActive = false; script.authSuspended = true;
+                         this.saveScriptToDB(script);
+                         continue;
+                     }
+                }
+
                 if (script.authSuspended) continue;
+
                 try {
                     const isMatch = script.match.some(pattern => new RegExp(pattern.replace(/\*/g, '.*')).test(window.location.href));
                     if (isMatch) { eval(script.code); count++; }
@@ -198,7 +214,7 @@
             try {
                 const token = GM_getValue(GM_TOKEN_KEY, "");
                 if(!token) return;
-                const repoInfo = { owner: GITHUB_REPO_OWNER, name: GITHUB_REPO_NAME, token: token };
+                const repoInfo = { owner: PRIMARY_REPO.owner, name: PRIMARY_REPO.name, token: token };
                 const onlineScripts = await this.fetchScriptsWithManifest(repoInfo);
                 if(onlineScripts.length === 0) return;
                 if(!db) await this.openDatabase();
@@ -287,7 +303,7 @@
             return { success: false, error: "API Status " + (result.status || "Unknown") };
         },
 
-        // --- CORE UI LOGIC ---
+        // --- UI CORE ---
         loadAndDisplayScripts: async function(forceRefresh = false) {
             const scriptList = document.getElementById('script-list');
             if(cachedScriptData.online.length === 0 || forceRefresh) {
@@ -301,13 +317,37 @@
             }
 
             try {
-                const token = GM_getValue(GM_TOKEN_KEY, "");
-                const repoInfo = { owner: GITHUB_REPO_OWNER, name: GITHUB_REPO_NAME, token: token };
-                const onlineScripts = await this.fetchScriptsWithManifest(repoInfo);
+                // 1. Primary
+                const primaryToken = GM_getValue(GM_TOKEN_KEY, "");
+                const primaryInfo = { owner: PRIMARY_REPO.owner, name: PRIMARY_REPO.name, token: primaryToken, label: 'Stable' };
+                const p1 = this.fetchScriptsWithManifest(primaryInfo);
+
+                // 2. Custom
+                const customRepos = JSON.parse(GM_getValue(GM_CUSTOM_REPOS_KEY, "[]"));
+                const pCustom = customRepos.map(cr => this.fetchScriptsWithManifest({ owner: cr.owner, name: cr.name, token: cr.token, label: cr.name }));
+
+                // 3. Merge
+                const results = await Promise.all([p1, ...pCustom]);
+                const allOnline = results.flat();
+
+                // 4. Deduplicate
+                const mergedMap = new Map();
+                allOnline.forEach(script => {
+                    if (!mergedMap.has(script.name)) {
+                        mergedMap.set(script.name, script);
+                    } else {
+                        const existing = mergedMap.get(script.name);
+                        if (this.compareVersions(script.version, existing.version) > 0) {
+                            mergedMap.set(script.name, script);
+                        }
+                    }
+                });
+                const finalOnline = [...mergedMap.values()];
+
                 const localScripts = await this.getScriptsFromDB();
 
-                cachedScriptData = { online: onlineScripts, local: localScripts };
-                sessionStorage.setItem('bm_cache_data', JSON.stringify(onlineScripts));
+                cachedScriptData = { online: finalOnline, local: localScripts };
+                sessionStorage.setItem('bm_cache_data', JSON.stringify(finalOnline));
                 sessionStorage.setItem('bm_cache_timestamp', Date.now());
                 this._renderTabsAndContent();
 
@@ -325,15 +365,13 @@
             const detailsMap = new Map();
             let hasUpdates = false;
 
-            // Token Check für Self-Healing
-            const tokenValid = !!GM_getValue(GM_TOKEN_KEY, "");
-
             online.forEach(meta => {
                 scriptMetadataCache[meta.name] = meta;
                 const loc = local.find(s => s.name === meta.name);
 
                 let state = 'install';
                 let info = (meta.description || "") + (meta.changelog || "");
+                if(meta.repoInfo.label && meta.repoInfo.label !== 'Stable') info = `<em>Kanal: ${meta.repoInfo.label}</em><br>` + info;
 
                 if (loc) {
                     if(loc.isActive === false) state = 'inactive';
@@ -346,13 +384,9 @@
                     if (loc.hasSettings) meta.hasSettings = true;
                 }
 
-                // HEALING: Wenn Token da ist, ignorieren wir "authSuspended" Flag für die UI
-                if ((meta.authSuspended || (loc && loc.authSuspended)) && !tokenValid) {
+                if (meta.authSuspended || (loc && loc.authSuspended)) {
                     state = 'inactive'; meta.authSuspended = true;
                     info = `<strong style="color:var(--danger-color)">GESPERRT (Token Fehler)</strong><br>${info}`;
-                } else {
-                    // Token da -> entsperren
-                    meta.authSuspended = false;
                 }
 
                 if (!scriptStates[meta.name]) {
@@ -370,7 +404,7 @@
                 });
             });
 
-            // TABS (SQUEEZED FLEX)
+            // TABS
             const tabsBar = document.createElement('div');
             tabsBar.className = 'bm-tabs';
 
@@ -444,29 +478,20 @@
             let label = `<strong>${item.meta.name}</strong><div class="version">v${item.meta.version}</div>`;
             if (item.state === 'update') label = `<strong>${item.meta.name}</strong><div class="version update-text">🔄 v${item.meta.version}</div>`;
 
-            // Visualisierung für Pending States
-            if (item.state === 'install_pending') {
-                label = `<strong>${item.meta.name}</strong><div class="version" style="color:black;">Wird installiert</div>`;
-            } else if (item.state === 'uninstall_pending') {
-                label = `<strong><strike>${item.meta.name}</strike></strong><div class="version" style="color:white;">Wird gelöscht</div>`;
-            }
+            if (item.state === 'install_pending') label = `<strong>${item.meta.name}</strong><div class="version" style="background:var(--pending-cyan); color:black;">Wird installiert</div>`;
+            else if (item.state === 'uninstall_pending') label = `<strong><strike>${item.meta.name}</strike></strong><div class="version" style="background:var(--danger-color); color:white;">Wird gelöscht</div>`;
 
             div.innerHTML = label;
             div.title = item.info.replace(/<[^>]*>?/gm, '');
 
             if (!item.meta.authSuspended) {
-                // DELETE BUTTON (X) - Z-Index Fix
                 if (['active', 'update', 'inactive', 'downgrade', 'uninstall_pending'].includes(item.state)) {
                     const del = document.createElement('span');
                     del.className = 'bm-del-btn';
                     del.innerHTML = '✖';
-                    del.title = item.state === 'uninstall_pending' ? 'Löschen abbrechen' : 'Deinstallieren';
                     del.onclick = (e) => {
                         e.stopPropagation();
-                        e.preventDefault();
-
                         if (item.state === 'uninstall_pending') {
-                            // Undo
                             item.state = initialScriptStates[item.meta.name];
                             scriptStates[item.meta.name] = initialScriptStates[item.meta.name];
                         } else {
@@ -479,7 +504,6 @@
                     };
                     div.appendChild(del);
                 }
-
                 if (['active', 'update'].includes(item.state) && item.meta.hasSettings) {
                     const cfg = document.createElement('span');
                     cfg.className = 'bm-config-btn';
@@ -489,14 +513,12 @@
                 }
             }
 
-            // MAIN CLICK (Toggle Logic)
             div.onclick = () => {
                 if(item.meta.authSuspended) { alert("Skript gesperrt. Bitte Token prüfen."); return; }
                 if(item.state === 'uninstall_pending') return;
 
                 const current = item.state;
                 let next = current;
-
                 if (current === 'install') next = 'install_pending';
                 else if (current === 'install_pending') next = 'install';
                 else if (['active', 'update', 'downgrade'].includes(current)) next = 'inactive';
@@ -511,8 +533,7 @@
 
         applyChanges: async function() {
             const btn = document.getElementById('save-scripts-button');
-            btn.disabled = true;
-            btn.textContent = "Prüfe Änderungen...";
+            btn.disabled = true; btn.textContent = "Prüfe Änderungen...";
 
             let changes = [];
             for (const name in scriptStates) {
@@ -553,10 +574,131 @@
             }
 
             if(errors.length > 0) alert("Fehler:\n" + errors.join("\n"));
-            cachedScriptData.local = await this.getScriptsFromDB();
-            this._renderTabsAndContent();
+
+            await this.loadAndDisplayScripts(true);
             btn.textContent = "Gespeichert! (Schließen zum Aktivieren)";
             setTimeout(() => { if(btn) btn.disabled = false; }, 1000);
+        },
+
+        // --- REPO MANAGER UI (FIXED VISIBILITY) ---
+        _createRepoManagerUI: function() {
+            if (repoModalUiCreated) {
+                document.getElementById('bm-repo-modal').style.display = 'flex';
+                this._refreshRepoList();
+                return;
+            }
+
+            const div = document.createElement('div');
+            div.id = 'bm-repo-modal';
+            div.className = 'bm-modal-overlay';
+            div.style.zIndex = '10005';
+            div.innerHTML = `
+                <div class="bm-settings-content" style="max-width: 650px;">
+                    <div class="bm-settings-header">📚 Repository Verwaltung</div>
+                    <div class="bm-settings-body">
+
+                        <div class="bm-repo-card primary">
+                            <div class="bm-repo-title">Haupt-Repository (Stable)</div>
+                            <div style="font-size:0.8em; color:var(--text-muted);">${PRIMARY_REPO.path}</div>
+                            <div class="bm-settings-row" style="margin-top:10px;">
+                                <input type="password" id="bm-primary-token" placeholder="GitHub Token..." style="width:100%;">
+                            </div>
+                        </div>
+
+                        <hr style="border-color:var(--border-color); margin: 20px 0;">
+
+                        <div style="margin-bottom:10px; font-weight:bold;">Zusätzliche Kanäle (Beta / Alpha)</div>
+                        <div id="bm-repo-list"></div>
+
+                        <div class="bm-repo-add-form">
+                            <input type="text" id="bm-new-owner" placeholder="Owner" style="flex:1">
+                            <input type="text" id="bm-new-name" placeholder="Repo Name" style="flex:1">
+                            <input type="password" id="bm-new-token" placeholder="Token (optional)" style="flex:1">
+                            <button id="bm-add-repo-btn" style="background:var(--success-color)">+</button>
+                        </div>
+                        <div id="bm-repo-status" style="margin-top:10px; color:#aaa;"></div>
+
+                    </div>
+                    <div class="bm-settings-footer">
+                        <button id="bm-repo-save" style="background:var(--success-color);">Speichern & Aktualisieren</button>
+                        <button id="bm-repo-close" style="background:var(--btn-secondary);">Schließen</button>
+                    </div>
+                </div>`;
+            document.body.appendChild(div);
+
+            repoModalUiCreated = true;
+            this._refreshRepoList();
+
+            document.getElementById('bm-repo-close').onclick = () => div.style.display = 'none';
+
+            document.getElementById('bm-add-repo-btn').onclick = () => {
+                const owner = document.getElementById('bm-new-owner').value.trim();
+                const name = document.getElementById('bm-new-name').value.trim();
+                const token = document.getElementById('bm-new-token').value.trim();
+                if(!owner || !name) return alert("Owner und Name erforderlich.");
+                const repos = JSON.parse(GM_getValue(GM_CUSTOM_REPOS_KEY, "[]"));
+                repos.push({ owner, name, token });
+                GM_setValue(GM_CUSTOM_REPOS_KEY, JSON.stringify(repos));
+                this._refreshRepoList();
+                document.getElementById('bm-new-owner').value = "";
+                document.getElementById('bm-new-name').value = "";
+                document.getElementById('bm-new-token').value = "";
+            };
+
+            document.getElementById('bm-repo-save').onclick = async () => {
+                const btn = document.getElementById('bm-repo-save');
+                const oldText = btn.textContent;
+                btn.disabled = true; btn.textContent = "Speichere...";
+
+                const pToken = document.getElementById('bm-primary-token').value.trim();
+                GM_setValue(GM_TOKEN_KEY, pToken);
+                localStorage.setItem(LS_ACCESS_KEY, `${pToken}@${PRIMARY_REPO.path}`);
+
+                await this.loadAndDisplayScripts(true);
+
+                btn.textContent = "Gespeichert!";
+                setTimeout(() => {
+                    div.style.display = 'none';
+                    btn.disabled = false;
+                    btn.textContent = oldText;
+                }, 800);
+            };
+
+            // SHOW
+            div.style.display = 'flex';
+        },
+
+        _refreshRepoList: function() {
+            const list = document.getElementById('bm-repo-list');
+            const repos = JSON.parse(GM_getValue(GM_CUSTOM_REPOS_KEY, "[]"));
+            const pToken = GM_getValue(GM_TOKEN_KEY, "");
+
+            document.getElementById('bm-primary-token').value = pToken;
+
+            list.innerHTML = "";
+            if(repos.length === 0) list.innerHTML = "<div style='color:var(--text-muted); font-style:italic; padding:10px;'>Keine zusätzlichen Kanäle konfiguriert.</div>";
+
+            repos.forEach((r, idx) => {
+                const item = document.createElement('div');
+                item.className = 'bm-repo-item';
+                item.innerHTML = `
+                    <div style="flex:1">
+                        <strong>${r.owner}/${r.name}</strong><br>
+                        <span style="font-size:0.8em; color:var(--text-muted);">${r.token ? "Token hinterlegt" : "Öffentlich"}</span>
+                    </div>
+                    <button class="bm-repo-del" data-idx="${idx}">🗑️</button>
+                `;
+                list.appendChild(item);
+            });
+
+            document.querySelectorAll('.bm-repo-del').forEach(btn => {
+                btn.onclick = (e) => {
+                    const idx = e.target.dataset.idx;
+                    repos.splice(idx, 1);
+                    GM_setValue(GM_CUSTOM_REPOS_KEY, JSON.stringify(repos));
+                    this._refreshRepoList();
+                };
+            });
         },
 
         // --- SETTINGS UI ---
@@ -640,12 +782,14 @@
                 <div class="bm-modal-content">
                     <h3>B&M Scriptmanager</h3>
                     <div class="bm-toolbar">
-                        <div id="bm-script-filter-wrapper">
-                            <input type="text" id="bm-script-filter" placeholder="Suche...">
-                            <span id="bm-refresh-btn" title="Reload">🔄</span>
-                            <span id="bm-token-btn" title="Token">🔑</span>
+                        <input type="text" id="bm-script-filter" placeholder="Suche...">
+                        <div class="bm-toolbar-right">
+                            <div id="bm-stats-bar">Lade Statistiken...</div>
+                            <div class="bm-actions">
+                                <span id="bm-token-btn" title="Repositories & Token">🔑</span>
+                                <span id="bm-refresh-btn" title="Reload">🔄</span>
+                            </div>
                         </div>
-                        <div id="bm-stats-bar">Lade Statistiken...</div>
                     </div>
                     <div id="script-list"></div>
                 </div>
@@ -654,62 +798,24 @@
             document.body.appendChild(div);
             div.querySelector('.bm-close-btn').onclick = () => location.reload();
             document.getElementById('bm-refresh-btn').onclick = () => this.loadAndDisplayScripts(true);
-            document.getElementById('bm-token-btn').onclick = () => this._createTokenModalUI();
+            document.getElementById('bm-token-btn').onclick = () => this._createRepoManagerUI();
             document.getElementById('save-scripts-button').addEventListener('click', () => this.applyChanges());
             document.getElementById('bm-script-filter').addEventListener('input', () => this._renderTabsAndContent());
             managerUiCreated = true;
         },
 
-        _createTokenModalUI: function() {
-            if (!tokenModalUiCreated) {
-                const div = document.createElement('div');
-                div.id = 'bm-token-modal';
-                div.className = 'bm-modal-overlay';
-                div.style.zIndex = '10002';
-                div.innerHTML = `
-                    <div class="bm-settings-content" style="max-width: 400px;">
-                        <div class="bm-settings-header">🔒 Zugangstoken</div>
-                        <div class="bm-settings-body" style="overflow:visible;">
-                            <p style="font-size:0.9em; color:var(--text-muted); margin-bottom:10px;">Token für privaten Repo-Zugriff:</p>
-                            <input type="password" id="bm-pat-input" placeholder="github_pat_..." style="width:100%; padding:8px;">
-                            <div style="text-align:right; margin-top:5px;"><input type="checkbox" id="bm-pat-show"> Anzeigen</div>
-                            <div id="bm-pat-status" style="margin-top:10px;"></div>
-                        </div>
-                        <div class="bm-settings-footer">
-                            <button id="bm-pat-del" style="background:var(--danger-color);">Löschen</button>
-                            <button id="bm-pat-save" style="background:var(--success-color);">Speichern</button>
-                            <button id="bm-pat-close" style="background:var(--btn-secondary);">Schließen</button>
-                        </div>
-                    </div>`;
-                document.body.appendChild(div);
-                document.getElementById('bm-pat-close').onclick = () => div.style.display = 'none';
-                document.getElementById('bm-pat-show').onchange = (e) => document.getElementById('bm-pat-input').type = e.target.checked ? 'text' : 'password';
-                document.getElementById('bm-pat-del').onclick = async () => {
-                    if(confirm("Token löschen?")) {
-                        GM_deleteValue(GM_TOKEN_KEY); localStorage.removeItem(LS_ACCESS_KEY);
-                        const scripts = await this.getScriptsFromDB();
-                        for(const s of scripts) { if(s.repoInfo && s.repoInfo.owner === GITHUB_REPO_OWNER) { s.isActive = false; s.authSuspended = true; await this.saveScriptToDB(s); } }
-                        location.reload();
-                    }
-                };
-                document.getElementById('bm-pat-save').onclick = () => {
-                    const v = document.getElementById('bm-pat-input').value.trim();
-                    if(!v) return alert("Token fehlt.");
-                    GM_setValue(GM_TOKEN_KEY, v); location.reload();
-                };
-                tokenModalUiCreated = true;
-            }
-            document.getElementById('bm-pat-input').value = GM_getValue(GM_TOKEN_KEY, "");
-            document.getElementById('bm-token-modal').style.display = 'flex';
-        }
+        // Redirect
+        _createTokenModalUI: function() { this._createRepoManagerUI(); }
     };
 
-    // --- CSS (SOLID COLORS & SQUEEZED TABS) ---
+    // --- CSS ---
     GM_addStyle(`
         :root {
             --bg-dark: #1e2126;
             --bg-panel: #2c313a;
             --bg-card: #323a45;
+            --input-bg-high-contrast: #f0f2f5; /* HELL FÜR INPUTS */
+            --text-on-light: #222; /* DUNKEL FÜR TEXT IN INPUTS */
             --text-main: #eeeeee;
             --text-muted: #aaaaaa;
             --primary-blue: #0d6efd;
@@ -750,26 +856,38 @@
             padding-bottom: 12px; margin: 0 0 20px 0; font-weight: 300; font-size: 1.8em; letter-spacing: 1px;
         }
 
-        .bm-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; gap: 15px; }
-        #bm-script-filter-wrapper { position: relative; flex-grow: 1; max-width: 400px; }
-        #bm-script-filter {
-            width: 100%; padding: 10px 40px 10px 15px; background-color: var(--bg-panel);
-            color: var(--text-main); border: 1px solid var(--border-color); border-radius: 20px;
-            box-sizing: border-box; transition: border-color 0.2s;
+        /* CLEAN TOOLBAR LAYOUT */
+        .bm-toolbar {
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 20px; gap: 15px;
         }
-        #bm-script-filter:focus { outline: none; border-color: var(--primary-blue); }
+
+        /* SEARCH & INPUTS - HIGH CONTRAST */
+        #bm-script-filter, .bm-repo-add-form input, .bm-settings-row input, .bm-settings-row select, #bm-primary-token {
+            background-color: var(--input-bg-high-contrast);
+            color: var(--text-on-light);
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            padding: 8px 12px;
+            font-size: 1em;
+            transition: border-color 0.2s;
+        }
+        #bm-script-filter { width: 300px; }
+        #bm-script-filter:focus, input:focus { outline: none; border-color: var(--primary-blue); }
+        ::placeholder { color: #666; opacity: 1; }
+
+        .bm-toolbar-right { display: flex; align-items: center; gap: 20px; }
+        .bm-actions { display: flex; gap: 15px; }
 
         #bm-refresh-btn, #bm-token-btn {
-            position: absolute; top: 8px; font-size: 1.2em; cursor: pointer; color: var(--text-muted);
+            font-size: 1.4em; cursor: pointer; color: var(--text-muted);
             transition: color 0.2s, transform 0.3s;
         }
-        #bm-refresh-btn { right: 15px; }
-        #bm-token-btn { right: 45px; }
-        #bm-refresh-btn:hover, #bm-token-btn:hover { color: var(--text-main); transform: scale(1.1); }
+        #bm-refresh-btn:hover, #bm-token-btn:hover { color: var(--text-main); transform: scale(1.15); }
 
-        #bm-stats-bar { font-size: 0.9em; color: var(--text-muted); }
+        #bm-stats-bar { font-size: 0.9em; color: var(--text-muted); white-space: nowrap; }
 
-        /* TABS (BROWSER FLEX STYLE) */
+        /* TABS */
         .bm-tabs {
             display: flex; flex-wrap: nowrap; width: 100%; gap: 2px;
             border-bottom: 1px solid var(--border-color); margin-bottom: 20px;
@@ -777,9 +895,7 @@
         }
 
         .bm-tab {
-            flex: 1 1 0;
-            min-width: 0;
-            padding: 10px 5px;
+            flex: 1 1 0; min-width: 0; padding: 10px 5px;
             background: #333; color: #aaa; cursor: pointer;
             border-radius: 5px 5px 0 0; transition: flex-grow 0.2s ease, background-color 0.2s;
             font-weight: 500; text-align: center;
@@ -788,24 +904,15 @@
         }
         .bm-tab:hover { flex-grow: 2; background: var(--bg-card); color: var(--text-main); z-index: 2; }
 
-        /* FILLED BLUE BUBBLE FOR ACTIVE TAB */
         .bm-tab.active {
-            flex-grow: 3;
-            background-color: var(--primary-blue) !important;
-            color: white !important;
-            font-weight: bold;
-            z-index: 1;
-            border-color: var(--primary-blue) !important;
-            opacity: 1;
+            flex-grow: 3; background-color: var(--primary-blue) !important;
+            color: white !important; font-weight: bold; z-index: 1;
+            border-color: var(--primary-blue) !important; opacity: 1;
         }
-
         .bm-tab-update.active { background: var(--warning-color) !important; color: #333 !important; border-color: var(--warning-color) !important; }
 
         /* GRID & CARDS */
-        .bm-category-grid {
-            display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-            gap: 12px; padding-bottom: 10px;
-        }
+        .bm-category-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; padding-bottom: 10px; }
 
         .script-button {
             padding: 15px; border-radius: 6px; cursor: pointer; position: relative;
@@ -816,45 +923,26 @@
         }
         .script-button:hover { transform: translateY(-3px); box-shadow: var(--shadow-soft); z-index: 10; }
 
-        /* STATE COLORS (SOLID) */
         .script-button.install { border-color: var(--btn-secondary); color: var(--text-muted); }
         .script-button.install_pending { background: var(--pending-cyan); color: #000; border: none; }
 
-        /* FILLED ACTIVE BUTTON */
-        .script-button.active {
-            background: var(--primary-blue);
-            color: white;
-            border: none;
-        }
+        .script-button.active { background: var(--primary-blue); color: white; border: none; }
         .script-button.active strong { color: white; }
 
         .script-button.inactive { background: #343a40; color: #aaa; border: 1px solid var(--border-color); opacity: 0.9; }
         .script-button.update { background: linear-gradient(135deg, var(--warning-color), #e0a800); color: #222; animation: none; }
-
-        .script-button.uninstall_pending {
-            background: var(--danger-color); color: white; border: none; opacity: 0.9;
-        }
+        .script-button.uninstall_pending { background: var(--danger-color); color: white; border: none; opacity: 0.9; }
 
         .script-button strong { display: block; font-size: 1.05em; margin-bottom: 5px; line-height: 1.3; }
         .version { font-size: 0.85em; opacity: 0.8; background: rgba(0,0,0,0.2); padding: 2px 6px; border-radius: 10px; }
 
-        .bm-config-btn {
-            position: absolute; bottom: 5px; right: 5px; font-size: 1.1em; opacity: 0.6;
-            transition: opacity 0.2s; padding: 2px;
-        }
-        .bm-del-btn {
-            position: absolute; top: 2px; right: 5px; font-size: 1.1em; opacity: 0.6; color: #fff;
-            transition: opacity 0.2s; padding: 2px; font-weight: bold; z-index: 50; /* Z-Index erhöht */
-        }
+        .bm-config-btn { position: absolute; bottom: 5px; right: 5px; font-size: 1.1em; opacity: 0.6; transition: opacity 0.2s; padding: 2px; }
+        .bm-del-btn { position: absolute; top: 2px; right: 5px; font-size: 1.1em; opacity: 0.6; color: #fff; transition: opacity 0.2s; padding: 2px; font-weight: bold; }
         .bm-del-btn:hover { color: var(--text-main); transform: scale(1.3); opacity: 1; }
         .script-button:hover .bm-config-btn, .script-button:hover .bm-del-btn { opacity: 1; }
 
         /* FOOTER */
-        #save-scripts-button {
-            width: 100%; padding: 14px; margin-top: 15px; font-weight: bold; color: white;
-            background-color: var(--primary-blue); border: none; border-radius: 6px;
-            cursor: pointer; font-size: 1.1em; transition: background 0.2s;
-        }
+        #save-scripts-button { width: 100%; padding: 14px; margin-top: 15px; font-weight: bold; color: white; background-color: var(--primary-blue); border: none; border-radius: 6px; cursor: pointer; font-size: 1.1em; transition: background 0.2s; }
         #save-scripts-button:hover { background-color: var(--primary-blue-hover); }
         #save-scripts-button:disabled { background-color: var(--btn-secondary); cursor: not-allowed; }
 
@@ -862,37 +950,24 @@
         .bm-close-btn:hover { color: var(--text-main); }
 
         /* MODAL */
-        .bm-modal-overlay {
-            display: none; position: fixed; z-index: 10001; left: 0; top: 0; width: 100%; height: 100%;
-            background-color: rgba(0,0,0,0.6); backdrop-filter: blur(4px);
-            justify-content: center; align-items: center;
-        }
-        .bm-settings-content {
-            background-color: var(--bg-dark); color: var(--text-main); padding: 25px;
-            border-radius: 10px; border: 1px solid var(--border-color); width: 90%; max-width: 500px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.6);
-        }
-        .bm-settings-header {
-            font-size: 1.4em; margin-bottom: 20px; border-bottom: 1px solid var(--border-color);
-            padding-bottom: 10px; font-weight: 300;
-        }
+        .bm-modal-overlay { display: none; position: fixed; z-index: 10001; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.6); backdrop-filter: blur(4px); justify-content: center; align-items: center; }
+        .bm-settings-content { background-color: var(--bg-dark); color: var(--text-main); padding: 25px; border-radius: 10px; border: 1px solid var(--border-color); width: 90%; max-width: 600px; box-shadow: 0 10px 40px rgba(0,0,0,0.6); }
+        .bm-settings-header { font-size: 1.4em; margin-bottom: 20px; border-bottom: 1px solid var(--border-color); padding-bottom: 10px; font-weight: 300; }
         .bm-settings-row { display: grid; grid-template-columns: 2fr 1fr; gap: 15px; align-items: center; margin-bottom: 15px; }
-        .bm-settings-row input, .bm-settings-row select {
-            width: 100%; box-sizing: border-box; background-color: var(--bg-panel); color: var(--text-main);
-            border: 1px solid var(--border-color); padding: 8px; border-radius: 4px;
-        }
+
         .bm-settings-footer { margin-top: 25px; text-align: right; border-top: 1px solid var(--border-color); padding-top: 15px; }
-        .bm-settings-footer button {
-            padding: 10px 20px; border-radius: 5px; border: none; cursor: pointer; margin-left: 10px; font-weight: 500; color: white;
-        }
+        .bm-settings-footer button { padding: 10px 20px; border-radius: 5px; border: none; cursor: pointer; margin-left: 10px; font-weight: 500; color: white; }
 
-        .bm-loader {
-            display: inline-block; border: 3px solid rgba(255,255,255,0.1);
-            border-top: 3px solid var(--primary-blue); border-radius: 50%;
-            width: 20px; height: 20px; animation: bm-spin 0.8s linear infinite; margin-right: 10px; vertical-align: middle;
-        }
+        /* REPO MANAGER STYLES */
+        .bm-repo-card { background: var(--bg-panel); padding: 15px; border-radius: 6px; margin-bottom: 10px; border-left: 4px solid var(--primary-blue); }
+        .bm-repo-title { font-weight: bold; font-size: 1.1em; color: var(--text-main); }
+        .bm-repo-item { display: flex; align-items: center; justify-content: space-between; background: var(--bg-card); padding: 10px; border-radius: 4px; margin-bottom: 8px; border: 1px solid var(--border-color); }
+        .bm-repo-add-form { display: flex; gap: 10px; margin-top: 20px; }
+
+        .bm-repo-del { background: var(--danger-color); border:none; padding: 5px 10px; border-radius: 4px; cursor: pointer; color:white; }
+
+        .bm-loader { display: inline-block; border: 3px solid rgba(255,255,255,0.1); border-top: 3px solid var(--primary-blue); border-radius: 50%; width: 20px; height: 20px; animation: bm-spin 0.8s linear infinite; margin-right: 10px; vertical-align: middle; }
         @keyframes bm-spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-
         #b-m-scriptmanager-link.bm-update-highlight { background-color: var(--primary-blue) !important; color: white !important; border-radius: 4px; padding: 2px 6px; }
     `);
 
