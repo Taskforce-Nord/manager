@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         B&M Scriptmanager (V17.3 - Stats & Updates)
-// @namespace    https://github.com/taskforce-Nord/manager
-// @version      17.3.0
-// @description  Vollständige Version mit Statistik, Update-Anzeige, Private-Repo Support und Anti-Loop.
+// @name         B&M Scriptmanager (V21 - Solid Blue & Squeezed Tabs)
+// @namespace    https://github.com/taskforce-Nord/public
+// @version      21.0.0
+// @description  Vollflächige Farben (Blau/Rot/Grau). Tabs quetschen sich (Browser-Style). Fix für Reaktivierung.
 // @author       B&M
 // @match        https://www.leitstellenspiel.de/*
 // @grant        GM_xmlhttpRequest
@@ -20,7 +20,7 @@
 
     // --- KONFIGURATION ---
     const GITHUB_REPO_OWNER = 'Taskforce-Nord';
-    const GITHUB_REPO_NAME = 'public'; // Privat!
+    const GITHUB_REPO_NAME = 'public';
     const REPO_PATH_FULL = `${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}`;
 
     const SYNC_CONFIG_FILE = 'sync_meta.json';
@@ -39,7 +39,10 @@
     let managerUiCreated = false;
     let settingsModalUiCreated = false;
     let tokenModalUiCreated = false;
-    let filterMode = 'all'; // 'all' oder 'updates'
+
+    // UI State
+    let activeTab = 'Alle';
+    let cachedScriptData = { online: [], local: [] };
 
     // --- INIT ---
     try {
@@ -103,33 +106,26 @@
         // --- SYSTEM START ---
         initSystem: async function() {
             try {
-                // 1. Check Primary Repo Access
                 const token = GM_getValue(GM_TOKEN_KEY, "");
                 const access = await this._checkRepoAccess(token);
 
                 if (access === 'DENIED') {
-                    console.error("[B&M] Access Denied. Token invalid/missing for private repo.");
+                    console.error("[B&M] Access Denied.");
                     this._showSetupScreen("Zugriff auf Haupt-Repository verweigert.<br>Bitte Token prüfen.");
-                    return; // STOP.
+                    return;
                 }
 
-                // 2. Load DB & Scripts
                 await this.openDatabase();
                 await this._executeInstalledScripts(token);
                 this._initUIHooks();
-
-                // 3. Background Check für Update-Indikator am Button
                 this.checkForUpdatesInBackground();
 
-            } catch (e) {
-                console.error("[B&M Init Error]", e);
-            }
+            } catch (e) { console.error("[B&M Init Error]", e); }
         },
 
         _checkRepoAccess: function(token) {
             const url = `https://api.github.com/repos/${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}/contents/manifest.json`;
             const headers = token ? { "Authorization": `token ${token}` } : {};
-
             return new Promise(resolve => {
                 GM_xmlhttpRequest({
                     method: "GET", url: url, headers: headers,
@@ -149,13 +145,10 @@
                     clearInterval(checkBody);
                     this._createTokenModalUI();
                     const status = document.getElementById('bm-pat-status');
-                    if(status) {
-                        status.innerHTML = msg;
-                        status.style.color = 'orange';
-                    }
+                    if(status) { status.innerHTML = msg; status.style.color = '#ff4444'; }
                     const btn = document.createElement('div');
                     btn.innerHTML = '⚠️ B&M Setup';
-                    btn.style.cssText = 'position:fixed;bottom:10px;right:10px;z-index:99999;background:#d33;color:white;padding:10px;border-radius:5px;cursor:pointer;';
+                    btn.style.cssText = 'position:fixed;bottom:10px;right:10px;z-index:99999;background:#d9534f;color:white;padding:10px;border-radius:5px;cursor:pointer;font-family:sans-serif;box-shadow:0 2px 10px rgba(0,0,0,0.5);';
                     btn.onclick = () => this._createTokenModalUI();
                     document.body.appendChild(btn);
                 }
@@ -166,26 +159,17 @@
             if (!db) return;
             const scripts = await this.getScriptsFromDB();
             let count = 0;
-
             for (const script of scripts.filter(s => s.isActive !== false)) {
                 const isPrimary = script.repoInfo && script.repoInfo.owner === GITHUB_REPO_OWNER && script.repoInfo.name === GITHUB_REPO_NAME;
-
                 if (isPrimary && !token) {
-                    console.warn(`[B&M] Blocked '${script.name}': Private repo script without token.`);
-                    script.isActive = false;
-                    script.authSuspended = true;
+                    script.isActive = false; script.authSuspended = true;
                     this.saveScriptToDB(script);
                     continue;
                 }
-
                 if (script.authSuspended) continue;
-
                 try {
                     const isMatch = script.match.some(pattern => new RegExp(pattern.replace(/\*/g, '.*')).test(window.location.href));
-                    if (isMatch) {
-                        eval(script.code);
-                        count++;
-                    }
+                    if (isMatch) { eval(script.code); count++; }
                 } catch (e) { console.error(`[B&M] Exec Error '${script.name}':`, e); }
             }
             console.log(`[B&M] ${count} Modules loaded.`);
@@ -214,26 +198,16 @@
             try {
                 const token = GM_getValue(GM_TOKEN_KEY, "");
                 if(!token) return;
-
                 const repoInfo = { owner: GITHUB_REPO_OWNER, name: GITHUB_REPO_NAME, token: token };
-                // Wir laden nur das Manifest, geht schnell
                 const onlineScripts = await this.fetchScriptsWithManifest(repoInfo);
                 if(onlineScripts.length === 0) return;
-
                 if(!db) await this.openDatabase();
                 const localScripts = await this.getScriptsFromDB();
-
                 const activeLocals = localScripts.filter(s => s.isActive);
-                let updateFound = false;
-
-                for (const local of activeLocals) {
+                const updateFound = activeLocals.some(local => {
                     const remote = onlineScripts.find(s => s.name === local.name);
-                    if (remote && this.compareVersions(remote.version, local.version) > 0) {
-                        updateFound = true;
-                        break;
-                    }
-                }
-
+                    return remote && this.compareVersions(remote.version, local.version) > 0;
+                });
                 if (updateFound) {
                     const link = document.getElementById('b-m-scriptmanager-link');
                     if (link) link.classList.add('bm-update-highlight');
@@ -268,7 +242,7 @@
             return 0;
         },
 
-        // --- API & LOADING ---
+        // --- API ---
         _fetchRESTContents: function(path, token) {
             return new Promise((resolve) => {
                 const fullUrl = 'https://api.github.com/repos/' + path;
@@ -313,80 +287,80 @@
             return { success: false, error: "API Status " + (result.status || "Unknown") };
         },
 
-        // --- UI CORE ---
+        // --- CORE UI LOGIC ---
         loadAndDisplayScripts: async function(forceRefresh = false) {
             const scriptList = document.getElementById('script-list');
-            const updateContainer = document.getElementById('bm-update-list-container');
-
-            scriptList.innerHTML = '<div class="bm-loader-container"><div class="bm-loader"></div> Lade Daten...</div>';
-            if(filterMode === 'updates') updateContainer.style.display = 'block';
-            else updateContainer.style.display = 'none';
+            if(cachedScriptData.online.length === 0 || forceRefresh) {
+                scriptList.innerHTML = '<div class="bm-loader-container"><div class="bm-loader"></div> Lade Daten...</div>';
+            }
 
             if (forceRefresh) {
                 sessionStorage.removeItem('bm_cache_data');
                 sessionStorage.removeItem('bm_cache_timestamp');
+                activeTab = 'Alle';
             }
 
             try {
                 const token = GM_getValue(GM_TOKEN_KEY, "");
                 const repoInfo = { owner: GITHUB_REPO_OWNER, name: GITHUB_REPO_NAME, token: token };
-
                 const onlineScripts = await this.fetchScriptsWithManifest(repoInfo);
                 const localScripts = await this.getScriptsFromDB();
 
-                this._populateUI(onlineScripts, localScripts);
+                cachedScriptData = { online: onlineScripts, local: localScripts };
                 sessionStorage.setItem('bm_cache_data', JSON.stringify(onlineScripts));
                 sessionStorage.setItem('bm_cache_timestamp', Date.now());
+                this._renderTabsAndContent();
 
             } catch (e) {
-                scriptList.innerHTML = `<p style="color:red; text-align:center;">Fehler: ${e.message}</p>`;
+                scriptList.innerHTML = `<p style="color:var(--danger-color); text-align:center;">Fehler: ${e.message}</p>`;
             }
         },
 
-        _populateUI: function(onlineScripts, localScripts) {
-            const scriptList = document.getElementById('script-list');
-            const updateContainer = document.getElementById('bm-update-list-container');
-            const updateList = document.getElementById('bm-update-list');
-            const statsBar = document.getElementById('bm-stats-bar');
-
-            scriptList.innerHTML = '';
-            updateList.innerHTML = '';
-
-            scriptStates = {};
-            initialScriptStates = {};
-            scriptMetadataCache = {};
+        _renderTabsAndContent: function() {
+            const { online, local } = cachedScriptData;
+            const container = document.getElementById('script-list');
+            container.innerHTML = '';
 
             const categoryMap = new Map();
             const detailsMap = new Map();
+            let hasUpdates = false;
 
-            onlineScripts.forEach(meta => {
+            // Token Check für Self-Healing
+            const tokenValid = !!GM_getValue(GM_TOKEN_KEY, "");
+
+            online.forEach(meta => {
                 scriptMetadataCache[meta.name] = meta;
-                const local = localScripts.find(s => s.name === meta.name);
+                const loc = local.find(s => s.name === meta.name);
 
                 let state = 'install';
                 let info = (meta.description || "") + (meta.changelog || "");
 
-                if (local) {
-                    if(local.isActive === false) state = 'inactive';
+                if (loc) {
+                    if(loc.isActive === false) state = 'inactive';
                     else {
-                        const cmp = this.compareVersions(meta.version, local.version);
-                        if (cmp > 0) state = 'update';
+                        const cmp = this.compareVersions(meta.version, loc.version);
+                        if (cmp > 0) { state = 'update'; hasUpdates = true; }
                         else if (cmp < 0) state = 'downgrade';
                         else state = 'active';
                     }
-                    if (local.hasSettings) meta.hasSettings = true;
+                    if (loc.hasSettings) meta.hasSettings = true;
                 }
 
-                if (meta.authSuspended || (local && local.authSuspended)) {
-                    state = 'inactive';
-                    meta.authSuspended = true;
-                    info = `<strong style="color:red">GESPERRT (Token Fehler)</strong><br>${info}`;
+                // HEALING: Wenn Token da ist, ignorieren wir "authSuspended" Flag für die UI
+                if ((meta.authSuspended || (loc && loc.authSuspended)) && !tokenValid) {
+                    state = 'inactive'; meta.authSuspended = true;
+                    info = `<strong style="color:var(--danger-color)">GESPERRT (Token Fehler)</strong><br>${info}`;
+                } else {
+                    // Token da -> entsperren
+                    meta.authSuspended = false;
                 }
 
-                scriptStates[meta.name] = state;
-                initialScriptStates[meta.name] = state;
+                if (!scriptStates[meta.name]) {
+                    scriptStates[meta.name] = state;
+                    initialScriptStates[meta.name] = state;
+                }
 
-                const item = { meta, info, state };
+                const item = { meta, info, state: scriptStates[meta.name] };
                 detailsMap.set(meta.name, item);
 
                 const cats = meta.categories || [DEFAULT_CATEGORY];
@@ -396,61 +370,68 @@
                 });
             });
 
-            // Statistik Berechnung
-            const totalAvailable = detailsMap.size;
-            const totalInstalled = [...detailsMap.values()].filter(d => d.state !== 'install').length;
-            const totalActive = [...detailsMap.values()].filter(d => ['active','update','downgrade'].includes(d.state)).length;
-            const totalUpdates = [...detailsMap.values()].filter(d => ['update','downgrade'].includes(d.state)).length;
+            // TABS (SQUEEZED FLEX)
+            const tabsBar = document.createElement('div');
+            tabsBar.className = 'bm-tabs';
 
-            let statsHTML = `Verfügbar: <span class="stat-count">${totalAvailable}</span> | Installiert: <span class="stat-count">${totalInstalled}</span> (Aktiv: <span class="stat-count active">${totalActive}</span>)`;
-            if (totalUpdates > 0) {
-                statsHTML += ` | <span id="bm-stats-updates-trigger" title="Nur Updates anzeigen" style="cursor:pointer; color:#ffc107; font-weight:bold;">Updates: <span class="stat-count updates">${totalUpdates}</span></span>`;
+            const allTab = document.createElement('div');
+            allTab.className = `bm-tab ${activeTab === 'Alle' ? 'active' : ''}`;
+            allTab.textContent = `Alle (${detailsMap.size})`;
+            allTab.onclick = () => this._switchTab('Alle');
+            tabsBar.appendChild(allTab);
+
+            if (hasUpdates) {
+                const updateCount = [...detailsMap.values()].filter(d => d.state === 'update' || d.state === 'downgrade').length;
+                const upTab = document.createElement('div');
+                upTab.className = `bm-tab bm-tab-update ${activeTab === 'Updates' ? 'active' : ''}`;
+                upTab.textContent = `Updates (${updateCount})`;
+                upTab.onclick = () => this._switchTab('Updates');
+                tabsBar.appendChild(upTab);
             }
-            if(statsBar) statsBar.innerHTML = statsHTML;
 
-            // Render Logik basierend auf Filter
-            if (filterMode === 'updates') {
-                scriptList.style.display = 'none';
-                updateContainer.style.display = 'block';
+            const sortedCats = [...categoryMap.keys()].sort();
+            sortedCats.forEach(cat => {
+                const count = categoryMap.get(cat).length;
+                const tab = document.createElement('div');
+                tab.className = `bm-tab ${activeTab === cat ? 'active' : ''}`;
+                tab.textContent = `${cat} (${count})`;
+                tab.onclick = () => this._switchTab(cat);
+                tabsBar.appendChild(tab);
+            });
+            container.appendChild(tabsBar);
 
-                const updates = [...detailsMap.values()].filter(d => ['update','downgrade'].includes(d.state));
-                if(updates.length > 0) {
-                    updates.forEach(item => updateList.appendChild(this.createUIElement(item)));
-                } else {
-                    updateList.innerHTML = "<p>Keine Updates verfügbar.</p>";
-                }
-            } else {
-                scriptList.style.display = 'flex';
-                updateContainer.style.display = 'none';
+            // GRID
+            const grid = document.createElement('div');
+            grid.className = 'bm-category-grid';
 
-                [...categoryMap.keys()].sort().forEach(cat => {
-                    const group = document.createElement('details');
-                    group.className = 'bm-category-group';
-                    group.open = true;
+            let itemsToShow = [];
+            const filterText = document.getElementById('bm-script-filter').value.toLowerCase();
 
-                    const head = document.createElement('summary');
-                    head.className = 'bm-category-header';
-                    head.textContent = `${cat} (${categoryMap.get(cat).length})`;
-                    group.appendChild(head);
+            if (activeTab === 'Alle') itemsToShow = [...detailsMap.values()];
+            else if (activeTab === 'Updates') itemsToShow = [...detailsMap.values()].filter(d => d.state === 'update' || d.state === 'downgrade');
+            else itemsToShow = categoryMap.get(activeTab) || [];
 
-                    const grid = document.createElement('div');
-                    grid.className = 'bm-category-grid';
+            if (filterText) itemsToShow = itemsToShow.filter(i => i.meta.name.toLowerCase().includes(filterText) || i.info.toLowerCase().includes(filterText));
+            itemsToShow.sort((a,b) => a.meta.name.localeCompare(b.meta.name));
 
-                    categoryMap.get(cat).sort((a,b) => a.meta.name.localeCompare(b.meta.name)).forEach(item => {
-                        grid.appendChild(this.createUIElement(item));
-                    });
+            if (itemsToShow.length === 0) grid.innerHTML = '<p style="padding:20px; color:var(--text-muted); grid-column:1/-1;">Keine Skripte in dieser Ansicht.</p>';
+            else itemsToShow.forEach(item => grid.appendChild(this.createUIElement(item)));
 
-                    group.appendChild(grid);
-                    scriptList.appendChild(group);
-                });
-            }
+            container.appendChild(grid);
 
             const btn = document.getElementById('save-scripts-button');
-            if(btn.textContent.indexOf("Gespeichert") === -1) {
-                btn.textContent = "Änderungen anwenden";
-                btn.disabled = false;
-            }
+            if(btn.textContent.indexOf("Gespeichert") === -1) { btn.textContent = "Änderungen anwenden"; btn.disabled = false; }
             btn.style.display = 'block';
+
+            const statsBar = document.getElementById('bm-stats-bar');
+            const totalInstalled = [...detailsMap.values()].filter(d => d.state !== 'install' && d.state !== 'install_pending').length;
+            const totalActive = [...detailsMap.values()].filter(d => ['active','update','downgrade'].includes(d.state)).length;
+            if(statsBar) statsBar.innerHTML = `Installiert: <span style="color:#eee; font-weight:bold;">${totalInstalled}</span> | Aktiv: <span style="color:var(--primary-blue); font-weight:bold;">${totalActive}</span>`;
+        },
+
+        _switchTab: function(tabName) {
+            activeTab = tabName;
+            this._renderTabsAndContent();
         },
 
         createUIElement: function(item) {
@@ -459,40 +440,72 @@
             if(item.meta.authSuspended) div.style.opacity = '0.5';
 
             div.dataset.scriptName = item.meta.name.toLowerCase();
-            div.dataset.scriptInfo = item.info.toLowerCase();
 
-            let label = `<strong>${item.meta.name}</strong><br><span class="version">v${item.meta.version}</span>`;
-            if (item.state === 'update') label = `<strong>${item.meta.name}</strong><br><span>🔄 v${item.meta.version}</span>`;
+            let label = `<strong>${item.meta.name}</strong><div class="version">v${item.meta.version}</div>`;
+            if (item.state === 'update') label = `<strong>${item.meta.name}</strong><div class="version update-text">🔄 v${item.meta.version}</div>`;
+
+            // Visualisierung für Pending States
+            if (item.state === 'install_pending') {
+                label = `<strong>${item.meta.name}</strong><div class="version" style="color:black;">Wird installiert</div>`;
+            } else if (item.state === 'uninstall_pending') {
+                label = `<strong><strike>${item.meta.name}</strike></strong><div class="version" style="color:white;">Wird gelöscht</div>`;
+            }
 
             div.innerHTML = label;
             div.title = item.info.replace(/<[^>]*>?/gm, '');
 
-            if (['active', 'update'].includes(item.state) && item.meta.hasSettings && !item.meta.authSuspended) {
-                const cfg = document.createElement('span');
-                cfg.className = 'bm-config-btn';
-                cfg.innerHTML = '⚙️';
-                cfg.onclick = (e) => {
-                    e.stopPropagation();
-                    this._fetchAndShowSettingsUI(item.meta.name);
-                };
-                div.appendChild(cfg);
+            if (!item.meta.authSuspended) {
+                // DELETE BUTTON (X) - Z-Index Fix
+                if (['active', 'update', 'inactive', 'downgrade', 'uninstall_pending'].includes(item.state)) {
+                    const del = document.createElement('span');
+                    del.className = 'bm-del-btn';
+                    del.innerHTML = '✖';
+                    del.title = item.state === 'uninstall_pending' ? 'Löschen abbrechen' : 'Deinstallieren';
+                    del.onclick = (e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+
+                        if (item.state === 'uninstall_pending') {
+                            // Undo
+                            item.state = initialScriptStates[item.meta.name];
+                            scriptStates[item.meta.name] = initialScriptStates[item.meta.name];
+                        } else {
+                            if(confirm(`Skript "${item.meta.name}" wirklich entfernen?`)) {
+                                item.state = 'uninstall_pending';
+                                scriptStates[item.meta.name] = 'uninstall';
+                            }
+                        }
+                        this._renderTabsAndContent();
+                    };
+                    div.appendChild(del);
+                }
+
+                if (['active', 'update'].includes(item.state) && item.meta.hasSettings) {
+                    const cfg = document.createElement('span');
+                    cfg.className = 'bm-config-btn';
+                    cfg.innerHTML = '⚙️';
+                    cfg.onclick = (e) => { e.stopPropagation(); this._fetchAndShowSettingsUI(item.meta.name); };
+                    div.appendChild(cfg);
+                }
             }
 
+            // MAIN CLICK (Toggle Logic)
             div.onclick = () => {
                 if(item.meta.authSuspended) { alert("Skript gesperrt. Bitte Token prüfen."); return; }
+                if(item.state === 'uninstall_pending') return;
 
-                const current = scriptStates[item.meta.name];
+                const current = item.state;
                 let next = current;
 
-                if (current === 'install') next = 'activate';
-                else if (current === 'activate') next = 'install';
+                if (current === 'install') next = 'install_pending';
+                else if (current === 'install_pending') next = 'install';
                 else if (['active', 'update', 'downgrade'].includes(current)) next = 'inactive';
                 else if (current === 'inactive') next = 'active';
 
                 scriptStates[item.meta.name] = next;
-                div.className = `script-button ${next}`;
+                item.state = next;
+                this._renderTabsAndContent();
             };
-
             return div;
         },
 
@@ -503,7 +516,8 @@
 
             let changes = [];
             for (const name in scriptStates) {
-                if (scriptStates[name] !== initialScriptStates[name] || scriptStates[name] === 'update') {
+                const s = scriptStates[name];
+                if (s === 'install_pending' || s === 'uninstall' || s === 'update' || (s !== initialScriptStates[name] && s !== 'install')) {
                     changes.push(name);
                 }
             }
@@ -514,59 +528,35 @@
                 return;
             }
 
-            let successCount = 0;
             let errors = [];
-
             for (let i = 0; i < changes.length; i++) {
                 const name = changes[i];
                 const state = scriptStates[name];
                 btn.textContent = `Speichere ${i+1}/${changes.length}: ${name}...`;
-
                 try {
                     const meta = scriptMetadataCache[name];
-
-                    if (state === 'activate' || state === 'update' || state === 'downgrade' || state === 'active') {
+                    if (state === 'install_pending' || state === 'activate' || state === 'update' || state === 'downgrade' || state === 'active') {
                         const res = await this.fetchRawScript(meta.dirName, meta.fullName, meta.repoInfo);
                         if (res.success) {
                             const hasCfg = this.codeHasSettings(res.content);
                             const match = this.extractMatchFromCode(res.content);
-                            const scriptObj = {
-                                name: meta.name,
-                                version: meta.version,
-                                code: res.content,
-                                match: match,
-                                hasSettings: hasCfg,
-                                isActive: true,
-                                repoInfo: meta.repoInfo
-                            };
+                            const scriptObj = { name: meta.name, version: meta.version, code: res.content, match: match, hasSettings: hasCfg, isActive: true, repoInfo: meta.repoInfo };
                             await this.saveScriptToDB(scriptObj);
-                            successCount++;
-                        } else {
-                            errors.push(`${name}: Fehler beim Download (${res.error || 'Unbekannt'})`);
-                        }
+                        } else errors.push(`${name}: Fehler beim Download`);
                     } else if (state === 'inactive') {
                         const local = await this.getSingleScriptFromDB(name);
-                        if(local) { local.isActive = false; await this.saveScriptToDB(local); successCount++; }
+                        if(local) { local.isActive = false; await this.saveScriptToDB(local); }
                     } else if (state === 'uninstall') {
                         await this.deleteScriptFromDB(name);
-                        successCount++;
                     }
-                } catch(e) {
-                    errors.push(`${name}: ${e.message}`);
-                }
+                } catch(e) { errors.push(`${name}: ${e.message}`); }
             }
 
-            if(errors.length > 0) {
-                alert("Fehler aufgetreten:\n" + errors.join("\n"));
-                btn.textContent = "Fertig (mit Fehlern)";
-            } else {
-                btn.textContent = "Gespeichert! (Schließen zum Aktivieren)";
-            }
-
-            await this.loadAndDisplayScripts(true);
-            const newBtn = document.getElementById('save-scripts-button');
-            if(errors.length === 0) newBtn.textContent = "Gespeichert! (Schließen zum Aktivieren)";
-            setTimeout(() => { if(newBtn) newBtn.disabled = false; }, 1000);
+            if(errors.length > 0) alert("Fehler:\n" + errors.join("\n"));
+            cachedScriptData.local = await this.getScriptsFromDB();
+            this._renderTabsAndContent();
+            btn.textContent = "Gespeichert! (Schließen zum Aktivieren)";
+            setTimeout(() => { if(btn) btn.disabled = false; }, 1000);
         },
 
         // --- SETTINGS UI ---
@@ -593,37 +583,29 @@
             const content = modal.querySelector('.bm-settings-content');
             content.innerHTML = '<div class="bm-loader-container"><div class="bm-loader"></div> Lade Konfiguration...</div>';
             modal.style.display = 'flex';
-
             let local = await this.getSingleScriptFromDB(scriptName);
             let code = local ? local.code : null;
-
             if(!code) {
                 const meta = scriptMetadataCache[scriptName];
                 const res = await this.fetchRawScript(meta.dirName, meta.fullName, meta.repoInfo);
                 if(res.success) code = res.content;
             }
-
             if (code && this.codeHasSettings(code)) {
                 try {
                     const match = code.match(/\/\*--BMScriptConfig([\s\S]*?)--\*\//);
                     const schema = JSON.parse(match[1]);
                     this._buildSettingsUI(scriptName, schema);
-                } catch (e) { content.innerHTML = '<p style="color:red">Config Fehler.</p><button onclick="this.parentElement.parentElement.style.display=\'none\'">Zu</button>'; }
-            } else {
-                content.innerHTML = '<p>Keine Einstellungen.</p><button onclick="this.parentElement.parentElement.style.display=\'none\'">Zu</button>';
-            }
+                } catch (e) { content.innerHTML = '<p style="color:var(--danger-color)">Config Fehler.</p><button onclick="this.parentElement.parentElement.style.display=\'none\'">Zu</button>'; }
+            } else { content.innerHTML = '<p>Keine Einstellungen.</p><button onclick="this.parentElement.parentElement.style.display=\'none\'">Zu</button>'; }
         },
         _buildSettingsUI: function(scriptName, schema) {
             const settings = this.getSettings(scriptName);
             const modal = document.getElementById('bm-settings-modal');
             const content = modal.querySelector('.bm-settings-content');
-
             let html = `<div class="bm-settings-header">${scriptName}</div><div class="bm-settings-body">`;
-
             schema.forEach(item => {
                 const val = settings[`param${item.param}`] ?? item.default;
                 html += `<div class="bm-settings-row"><label>${item.label}</label>`;
-
                 if(item.type === 'checkbox') html += `<input type="checkbox" id="bm-set-${item.param}" ${val ? 'checked' : ''}>`;
                 else if(item.type === 'number') html += `<input type="number" id="bm-set-${item.param}" value="${val}">`;
                 else if(item.type === 'select') {
@@ -631,13 +613,10 @@
                     item.options.forEach(opt => html += `<option value="${opt.value}" ${opt.value===val?'selected':''}>${opt.text}</option>`);
                     html += `</select>`;
                 } else html += `<input type="text" id="bm-set-${item.param}" value="${val}">`;
-
                 html += `</div>`;
             });
-
-            html += `</div><div class="bm-settings-footer"><button id="bm-set-save">Speichern</button> <button id="bm-set-cancel" style="background:#666">Abbrechen</button></div>`;
+            html += `</div><div class="bm-settings-footer"><button id="bm-set-save">Speichern</button> <button id="bm-set-cancel" style="background:var(--btn-secondary)">Abbrechen</button></div>`;
             content.innerHTML = html;
-
             document.getElementById('bm-set-cancel').onclick = () => modal.style.display = 'none';
             document.getElementById('bm-set-save').onclick = () => {
                 const newSets = {};
@@ -666,41 +645,18 @@
                             <span id="bm-refresh-btn" title="Reload">🔄</span>
                             <span id="bm-token-btn" title="Token">🔑</span>
                         </div>
-                        <select id="bm-view-switcher"><option value="category">Kategorien</option><option value="alphabetical">Liste</option></select>
+                        <div id="bm-stats-bar">Lade Statistiken...</div>
                     </div>
-                    <div id="bm-stats-bar"></div>
-                    <div id="bm-update-list-container" style="display:none"><h4>Updates</h4><div id="bm-update-list"></div></div>
                     <div id="script-list"></div>
                 </div>
                 <button id="save-scripts-button" style="display:none;">Änderungen anwenden</button>
             `;
             document.body.appendChild(div);
-
             div.querySelector('.bm-close-btn').onclick = () => location.reload();
-            document.getElementById('bm-refresh-btn').onclick = () => { filterMode='all'; this.loadAndDisplayScripts(true); };
+            document.getElementById('bm-refresh-btn').onclick = () => this.loadAndDisplayScripts(true);
             document.getElementById('bm-token-btn').onclick = () => this._createTokenModalUI();
             document.getElementById('save-scripts-button').addEventListener('click', () => this.applyChanges());
-
-            // View Switcher
-            document.getElementById('bm-view-switcher').addEventListener('change', () => { filterMode='all'; this.loadAndDisplayScripts(false); });
-
-            // Search
-            document.getElementById('bm-script-filter').addEventListener('input', (e) => {
-                const term = e.target.value.toLowerCase();
-                document.querySelectorAll('.script-button').forEach(btn => {
-                    const match = btn.dataset.scriptName.includes(term) || btn.dataset.scriptInfo.includes(term);
-                    btn.classList.toggle('hidden', !match);
-                });
-            });
-
-            // Update Trigger Event
-            document.getElementById('bm-stats-bar').addEventListener('click', (e) => {
-                if (e.target.id === 'bm-stats-updates-trigger' || e.target.parentElement.id === 'bm-stats-updates-trigger') {
-                    filterMode = 'updates';
-                    this.loadAndDisplayScripts(false);
-                }
-            });
-
+            document.getElementById('bm-script-filter').addEventListener('input', () => this._renderTabsAndContent());
             managerUiCreated = true;
         },
 
@@ -711,130 +667,233 @@
                 div.className = 'bm-modal-overlay';
                 div.style.zIndex = '10002';
                 div.innerHTML = `
-                    <div class="bm-settings-content" style="max-width: 400px; border: 1px solid #777;">
+                    <div class="bm-settings-content" style="max-width: 400px;">
                         <div class="bm-settings-header">🔒 Zugangstoken</div>
                         <div class="bm-settings-body" style="overflow:visible;">
-                            <p style="font-size:0.9em; color:#ccc; margin-bottom:10px;">Token für privaten Repo-Zugriff:</p>
-                            <input type="password" id="bm-pat-input" placeholder="github_pat_..." style="width:100%; padding:5px;">
+                            <p style="font-size:0.9em; color:var(--text-muted); margin-bottom:10px;">Token für privaten Repo-Zugriff:</p>
+                            <input type="password" id="bm-pat-input" placeholder="github_pat_..." style="width:100%; padding:8px;">
                             <div style="text-align:right; margin-top:5px;"><input type="checkbox" id="bm-pat-show"> Anzeigen</div>
                             <div id="bm-pat-status" style="margin-top:10px;"></div>
                         </div>
                         <div class="bm-settings-footer">
-                            <button id="bm-pat-del" style="background:#d33;">Löschen</button>
-                            <button id="bm-pat-save" style="background:#28a745;">Speichern</button>
-                            <button id="bm-pat-close" style="background:#666;">Schließen</button>
+                            <button id="bm-pat-del" style="background:var(--danger-color);">Löschen</button>
+                            <button id="bm-pat-save" style="background:var(--success-color);">Speichern</button>
+                            <button id="bm-pat-close" style="background:var(--btn-secondary);">Schließen</button>
                         </div>
                     </div>`;
                 document.body.appendChild(div);
-
                 document.getElementById('bm-pat-close').onclick = () => div.style.display = 'none';
                 document.getElementById('bm-pat-show').onchange = (e) => document.getElementById('bm-pat-input').type = e.target.checked ? 'text' : 'password';
-
                 document.getElementById('bm-pat-del').onclick = async () => {
                     if(confirm("Token löschen?")) {
-                        GM_deleteValue(GM_TOKEN_KEY);
-                        localStorage.removeItem(LS_ACCESS_KEY);
+                        GM_deleteValue(GM_TOKEN_KEY); localStorage.removeItem(LS_ACCESS_KEY);
                         const scripts = await this.getScriptsFromDB();
-                        for(const s of scripts) {
-                            if(s.repoInfo && s.repoInfo.owner === GITHUB_REPO_OWNER) {
-                                s.isActive = false; s.authSuspended = true;
-                                await this.saveScriptToDB(s);
-                            }
-                        }
+                        for(const s of scripts) { if(s.repoInfo && s.repoInfo.owner === GITHUB_REPO_OWNER) { s.isActive = false; s.authSuspended = true; await this.saveScriptToDB(s); } }
                         location.reload();
                     }
                 };
-
                 document.getElementById('bm-pat-save').onclick = () => {
                     const v = document.getElementById('bm-pat-input').value.trim();
                     if(!v) return alert("Token fehlt.");
-                    GM_setValue(GM_TOKEN_KEY, v);
-                    location.reload();
+                    GM_setValue(GM_TOKEN_KEY, v); location.reload();
                 };
                 tokenModalUiCreated = true;
             }
-            const modal = document.getElementById('bm-token-modal');
             document.getElementById('bm-pat-input').value = GM_getValue(GM_TOKEN_KEY, "");
-            modal.style.display = 'flex';
+            document.getElementById('bm-token-modal').style.display = 'flex';
         }
     };
 
-    // --- CSS (V14 Style) ---
+    // --- CSS (SOLID COLORS & SQUEEZED TABS) ---
     GM_addStyle(`
-        #lss-script-manager-container, .bm-modal-overlay { font-family: sans-serif; }
-        #lss-script-manager-container { position: fixed; top: 10vh; left: 50%; transform: translateX(-50%); z-index: 10000; background-color: #262c37; color: #eee; border: 1px solid #444c5e; border-radius: 5px; padding: 20px; height: 80vh; box-shadow: 0 4px 15px rgba(0,0,0,0.5); width: 90%; max-width: 1300px; display: none; flex-direction: column; box-sizing: border-box; }
+        :root {
+            --bg-dark: #1e2126;
+            --bg-panel: #2c313a;
+            --bg-card: #323a45;
+            --text-main: #eeeeee;
+            --text-muted: #aaaaaa;
+            --primary-blue: #0d6efd;
+            --primary-blue-hover: #0b5ed7;
+            --pending-cyan: #17a2b8;
+            --success-color: #28a745;
+            --warning-color: #f0ad4e;
+            --danger-color: #dc3545;
+            --btn-secondary: #5a6268;
+            --border-color: #444c5e;
+            --shadow-soft: 0 4px 6px rgba(0,0,0,0.3);
+            --font-family: "Segoe UI", "Roboto", "Helvetica Neue", Arial, sans-serif;
+        }
+
+        #lss-script-manager-container, .bm-modal-overlay { font-family: var(--font-family); color: var(--text-main); font-size: 14px; }
+
+        #lss-script-manager-container {
+            position: fixed; top: 8vh; left: 50%; transform: translateX(-50%); z-index: 10000;
+            background-color: var(--bg-dark); border: 1px solid var(--border-color);
+            border-radius: 8px; padding: 20px; height: 80vh; width: 90%; max-width: 1200px;
+            display: none; flex-direction: column; box-sizing: border-box;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        }
         #lss-script-manager-container.visible { display: flex; }
-        .bm-modal-content { flex-grow: 1; overflow-y: auto; min-height: 0; padding-right: 5px; scrollbar-width: thin; scrollbar-color: #5c677d #262c37; }
+
+        .bm-modal-content {
+            flex-grow: 1; overflow-y: auto; min-height: 0; padding-right: 8px;
+            display: flex; flex-direction: column;
+        }
+
+        /* Custom Scrollbar */
         .bm-modal-content::-webkit-scrollbar { width: 8px; }
-        .bm-modal-content::-webkit-scrollbar-track { background: #262c37; border-radius: 4px; }
-        .bm-modal-content::-webkit-scrollbar-thumb { background-color: #5c677d; border-radius: 4px; border: 2px solid #262c37; }
-        #lss-script-manager-container h3 { color: white; text-align: center; border-bottom: 2px solid #007bff; padding-bottom: 10px; margin: 0 0 15px 0; flex-shrink: 0; }
-        .bm-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; gap: 15px; flex-wrap: wrap; flex-shrink: 0; }
-        #bm-script-filter-wrapper { position: relative; flex-grow: 1; min-width: 300px; }
-        .bm-view-controls { display: flex; gap: 10px; align-items: center; }
-        #bm-view-switcher, #bm-collapse-all { background-color: #3a4150; color: #eee; border: 1px solid #5c677d; border-radius: 4px; padding: 8px 10px; cursor: pointer; }
-        #bm-script-filter { width: 100%; padding: 8px 70px 8px 10px; background-color: #3a4150; color: #eee; border: 1px solid #5c677d; border-radius: 4px; box-sizing: border-box; }
-        #bm-refresh-btn, #bm-token-btn { position: absolute; top: 7px; font-size: 1.5em; cursor: pointer; color: #aaa; transition: color .2s, transform .5s; }
-        #bm-refresh-btn { right: 10px; }
-        #bm-refresh-btn:hover { color: #fff; transform: rotate(180deg); }
-        #bm-token-btn { right: 40px; }
-        #bm-token-btn:hover { color: #fff; transform: scale(1.1); }
-        #b-m-scriptmanager-link.bm-update-highlight { background-color: #28a745; border-radius: 3px; }
-        #bm-stats-bar { background-color: rgba(58, 65, 80, 0.5); border: 1px solid #5c677d; border-radius: 4px; padding: 8px 15px; margin-bottom: 15px; font-size: 0.9em; color: #ccc; text-align: center; flex-shrink: 0; }
-        #bm-stats-bar .stat-count { font-weight: bold; color: #eee; margin: 0 2px; }
-        #bm-stats-bar .stat-count.active { color: #28a745; }
-        #bm-stats-bar .stat-count.inactive { color: #dc3545; }
-        #bm-update-list-container { margin-bottom: 15px; }
-        #bm-update-list-container h4 { color: #ffc107; border-bottom: 1px solid #ffc107; padding-bottom: 5px; margin: 0 0 15px 0; }
-        #bm-update-list { display: grid; grid-template-columns: repeat(7, 1fr); grid-auto-rows: 75px; gap: 15px; }
-        #script-list { display: flex; flex-wrap: wrap; gap: 15px; }
-        .bm-category-group { border: 1px solid #444c5e; border-radius: 5px; margin: 0; background: linear-gradient(145deg, #3a4150, #2c313d); box-shadow: 2px 2px 5px rgba(0,0,0,0.3); transition: all 0.3s ease; flex-basis: 300px; flex-grow: 1; }
-        .bm-category-group:hover { border-color: #007bff; box-shadow: 3px 3px 8px rgba(0, 123, 255, 0.3); transform: translateY(-2px); }
-        details[open].bm-category-group { flex-basis: 100%; background: transparent; box-shadow: none; border-color: #444c5e; }
-        details[open].bm-category-group:hover { transform: none; border-color: #444c5e; box-shadow: none; }
-        .bm-category-header { padding: 15px; cursor: pointer; border-radius: 4px; transition: background-color 0.2s ease; text-align: center; position: relative; list-style: none; }
-        .bm-category-header::-webkit-details-marker { display: none; }
-        .bm-category-header::after { content: '‣'; position: absolute; right: 20px; top: 50%; transform: translateY(-50%) rotate(0deg); transition: transform 0.3s ease; font-size: 1.5em; color: #aaa; }
-        details[open] .bm-category-header::after { transform: translateY(-50%) rotate(90deg); }
-        details[open] .bm-category-header { border-radius: 4px 4px 0 0; background-color: #3a4150; text-align: left; }
-        .bm-cat-title { font-size: 1.3em; font-weight: bold; color: #eee; margin-bottom: 10px; }
-        details[open] .bm-cat-title { font-size: 1.2em; margin-bottom: 0; display: inline-block; }
-        .bm-category-grid { display: grid; grid-template-columns: repeat(7, 1fr); grid-auto-rows: 75px; gap: 15px; padding: 0 15px; background-color: rgba(40, 48, 61, 0.3); max-height: 0; overflow: hidden; transition: max-height 0.4s ease-in-out, padding 0.4s ease-in-out; }
-        details[open] .bm-category-grid { max-height: 2000px; padding-top: 15px; padding-bottom: 15px; }
-        .script-button { padding: 8px; border-radius: 5px; cursor: pointer; transition: all 0.2s ease; position: relative; border: 2px solid transparent; text-align: center; font-size: 0.85em; display: flex; flex-direction: column; justify-content: center; align-items: center; }
-        .script-button.hidden { display: none; }
-        .script-button:hover { filter: brightness(1.15); transform: translateY(-2px); }
-        .script-button strong { line-height: 1.2; }
-        .script-button .version { font-size: 0.8em; opacity: 0.8; display: block; margin-top: 4px; }
-        .script-button.install { background-color: #007bff; color: white; border-color: #007bff; }
-        .script-button.update { background-color: #ffc107; border-color: #ffc107; color: #212529; }
-        .script-button.active { background-color: #28a745; color: white; border-color: #28a745; }
-        .script-button.inactive { background-color: #6c757d; color: white; border-color: #6c757d; }
-        .script-button.uninstall { background-color: #dc3545; color: white; border-color: #dc3545; }
-        .script-button.activate { background-color: #17a2b8; border-color: #17a2b8; color: white; }
-        .script-button.removed { background-color: #495057; color: #ced4da; border-color: #343a40; }
-        .script-button.removed:hover { filter: brightness(1); transform: none; }
-        .script-button.removed strong { text-decoration: line-through; }
-        .script-button.downgrade { background-color: #fd7e14; border-color: #fd7e14; color: white; }
-        #save-scripts-button { display: none; width: 100%; padding: 10px; margin-top: 20px; font-weight: bold; color: white; background-color: #007bff; border: none; border-radius: 5px; cursor: pointer; flex-shrink: 0; }
-        .bm-config-btn { cursor: pointer; font-size: 1.1em; position: absolute; bottom: 5px; right: 8px; opacity: 0.6; transition: opacity 0.2s; }
-        .script-button:hover .bm-config-btn { opacity: 1; }
-        .bm-close-btn { position: absolute; top: 10px; right: 15px; font-size: 28px; font-weight: bold; color: #aaa; cursor: pointer; line-height: 1; transition: color 0.2s ease; }
-        .bm-close-btn:hover { color: #fff; }
-        .bm-loader-container { display: flex; justify-content: center; align-items: center; padding: 40px; color: #aaa; font-size: 1.1em; grid-column: 1 / -1; }
-        .bm-loader { display: inline-block; border: 4px solid #444; border-top: 4px solid #007bff; border-radius: 50%; width: 24px; height: 24px; animation: bm-spin 1s linear infinite; margin-right: 15px; flex-shrink: 0; }
+        .bm-modal-content::-webkit-scrollbar-track { background: var(--bg-dark); border-radius: 4px; }
+        .bm-modal-content::-webkit-scrollbar-thumb { background-color: var(--border-color); border-radius: 4px; }
+
+        #lss-script-manager-container h3 {
+            text-align: center; border-bottom: 2px solid var(--primary-blue);
+            padding-bottom: 12px; margin: 0 0 20px 0; font-weight: 300; font-size: 1.8em; letter-spacing: 1px;
+        }
+
+        .bm-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; gap: 15px; }
+        #bm-script-filter-wrapper { position: relative; flex-grow: 1; max-width: 400px; }
+        #bm-script-filter {
+            width: 100%; padding: 10px 40px 10px 15px; background-color: var(--bg-panel);
+            color: var(--text-main); border: 1px solid var(--border-color); border-radius: 20px;
+            box-sizing: border-box; transition: border-color 0.2s;
+        }
+        #bm-script-filter:focus { outline: none; border-color: var(--primary-blue); }
+
+        #bm-refresh-btn, #bm-token-btn {
+            position: absolute; top: 8px; font-size: 1.2em; cursor: pointer; color: var(--text-muted);
+            transition: color 0.2s, transform 0.3s;
+        }
+        #bm-refresh-btn { right: 15px; }
+        #bm-token-btn { right: 45px; }
+        #bm-refresh-btn:hover, #bm-token-btn:hover { color: var(--text-main); transform: scale(1.1); }
+
+        #bm-stats-bar { font-size: 0.9em; color: var(--text-muted); }
+
+        /* TABS (BROWSER FLEX STYLE) */
+        .bm-tabs {
+            display: flex; flex-wrap: nowrap; width: 100%; gap: 2px;
+            border-bottom: 1px solid var(--border-color); margin-bottom: 20px;
+            overflow: hidden;
+        }
+
+        .bm-tab {
+            flex: 1 1 0;
+            min-width: 0;
+            padding: 10px 5px;
+            background: #333; color: #aaa; cursor: pointer;
+            border-radius: 5px 5px 0 0; transition: flex-grow 0.2s ease, background-color 0.2s;
+            font-weight: 500; text-align: center;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            border: 1px solid #444; border-bottom: none;
+        }
+        .bm-tab:hover { flex-grow: 2; background: var(--bg-card); color: var(--text-main); z-index: 2; }
+
+        /* FILLED BLUE BUBBLE FOR ACTIVE TAB */
+        .bm-tab.active {
+            flex-grow: 3;
+            background-color: var(--primary-blue) !important;
+            color: white !important;
+            font-weight: bold;
+            z-index: 1;
+            border-color: var(--primary-blue) !important;
+            opacity: 1;
+        }
+
+        .bm-tab-update.active { background: var(--warning-color) !important; color: #333 !important; border-color: var(--warning-color) !important; }
+
+        /* GRID & CARDS */
+        .bm-category-grid {
+            display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 12px; padding-bottom: 10px;
+        }
+
+        .script-button {
+            padding: 15px; border-radius: 6px; cursor: pointer; position: relative;
+            background: var(--bg-panel); text-align: center; min-height: 80px;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            transition: transform 0.2s, box-shadow 0.2s; border: 1px solid transparent;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+        .script-button:hover { transform: translateY(-3px); box-shadow: var(--shadow-soft); z-index: 10; }
+
+        /* STATE COLORS (SOLID) */
+        .script-button.install { border-color: var(--btn-secondary); color: var(--text-muted); }
+        .script-button.install_pending { background: var(--pending-cyan); color: #000; border: none; }
+
+        /* FILLED ACTIVE BUTTON */
+        .script-button.active {
+            background: var(--primary-blue);
+            color: white;
+            border: none;
+        }
+        .script-button.active strong { color: white; }
+
+        .script-button.inactive { background: #343a40; color: #aaa; border: 1px solid var(--border-color); opacity: 0.9; }
+        .script-button.update { background: linear-gradient(135deg, var(--warning-color), #e0a800); color: #222; animation: none; }
+
+        .script-button.uninstall_pending {
+            background: var(--danger-color); color: white; border: none; opacity: 0.9;
+        }
+
+        .script-button strong { display: block; font-size: 1.05em; margin-bottom: 5px; line-height: 1.3; }
+        .version { font-size: 0.85em; opacity: 0.8; background: rgba(0,0,0,0.2); padding: 2px 6px; border-radius: 10px; }
+
+        .bm-config-btn {
+            position: absolute; bottom: 5px; right: 5px; font-size: 1.1em; opacity: 0.6;
+            transition: opacity 0.2s; padding: 2px;
+        }
+        .bm-del-btn {
+            position: absolute; top: 2px; right: 5px; font-size: 1.1em; opacity: 0.6; color: #fff;
+            transition: opacity 0.2s; padding: 2px; font-weight: bold; z-index: 50; /* Z-Index erhöht */
+        }
+        .bm-del-btn:hover { color: var(--text-main); transform: scale(1.3); opacity: 1; }
+        .script-button:hover .bm-config-btn, .script-button:hover .bm-del-btn { opacity: 1; }
+
+        /* FOOTER */
+        #save-scripts-button {
+            width: 100%; padding: 14px; margin-top: 15px; font-weight: bold; color: white;
+            background-color: var(--primary-blue); border: none; border-radius: 6px;
+            cursor: pointer; font-size: 1.1em; transition: background 0.2s;
+        }
+        #save-scripts-button:hover { background-color: var(--primary-blue-hover); }
+        #save-scripts-button:disabled { background-color: var(--btn-secondary); cursor: not-allowed; }
+
+        .bm-close-btn { position: absolute; top: 15px; right: 20px; font-size: 24px; cursor: pointer; color: var(--text-muted); transition: color 0.2s; }
+        .bm-close-btn:hover { color: var(--text-main); }
+
+        /* MODAL */
+        .bm-modal-overlay {
+            display: none; position: fixed; z-index: 10001; left: 0; top: 0; width: 100%; height: 100%;
+            background-color: rgba(0,0,0,0.6); backdrop-filter: blur(4px);
+            justify-content: center; align-items: center;
+        }
+        .bm-settings-content {
+            background-color: var(--bg-dark); color: var(--text-main); padding: 25px;
+            border-radius: 10px; border: 1px solid var(--border-color); width: 90%; max-width: 500px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.6);
+        }
+        .bm-settings-header {
+            font-size: 1.4em; margin-bottom: 20px; border-bottom: 1px solid var(--border-color);
+            padding-bottom: 10px; font-weight: 300;
+        }
+        .bm-settings-row { display: grid; grid-template-columns: 2fr 1fr; gap: 15px; align-items: center; margin-bottom: 15px; }
+        .bm-settings-row input, .bm-settings-row select {
+            width: 100%; box-sizing: border-box; background-color: var(--bg-panel); color: var(--text-main);
+            border: 1px solid var(--border-color); padding: 8px; border-radius: 4px;
+        }
+        .bm-settings-footer { margin-top: 25px; text-align: right; border-top: 1px solid var(--border-color); padding-top: 15px; }
+        .bm-settings-footer button {
+            padding: 10px 20px; border-radius: 5px; border: none; cursor: pointer; margin-left: 10px; font-weight: 500; color: white;
+        }
+
+        .bm-loader {
+            display: inline-block; border: 3px solid rgba(255,255,255,0.1);
+            border-top: 3px solid var(--primary-blue); border-radius: 50%;
+            width: 20px; height: 20px; animation: bm-spin 0.8s linear infinite; margin-right: 10px; vertical-align: middle;
+        }
         @keyframes bm-spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-        .bm-modal-overlay { display: none; position: fixed; z-index: 10001; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.7); justify-content: center; align-items: center; }
-        .bm-settings-content { background-color: #2c313d; color: #eee; padding: 20px; border-radius: 5px; border: 1px solid #444c5e; width: 90%; max-width: 500px; box-shadow: 0 5px 20px rgba(0,0,0,0.5); }
-        .bm-settings-header { font-size: 1.5em; margin-bottom: 20px; border-bottom: 1px solid #444c5e; padding-bottom: 10px; }
-        .bm-settings-body { max-height: 60vh; overflow-y: auto; padding-right: 10px; }
-        .bm-settings-row { display: grid; grid-template-columns: 2fr 1fr; gap: 15px; align-items: center; margin-bottom: 12px; }
-        .bm-settings-row label { text-align: right; cursor: help; }
-        .bm-settings-row input, .bm-settings-row select { width: 100%; box-sizing: border-box; background-color: #dadada; color: #111; border: 1px solid #999; padding: 5px; border-radius: 3px; transition: border-color .2s ease; }
-        .bm-settings-row input:focus, .bm-settings-row select:focus { outline: none; border-color: #007bff; }
-        .bm-settings-row input[type="checkbox"] { width: 20px; height: 20px; justify-self: start; }
-        .bm-settings-footer { margin-top: 20px; text-align: right; border-top: 1px solid #444c5e; padding-top: 15px; }
-        .bm-settings-footer button { background-color: #007bff; color: white; border: none; padding: 8px 15px; border-radius: 4px; cursor: pointer; margin-left: 10px; }
+
+        #b-m-scriptmanager-link.bm-update-highlight { background-color: var(--primary-blue) !important; color: white !important; border-radius: 4px; padding: 2px 6px; }
     `);
 
     // START
