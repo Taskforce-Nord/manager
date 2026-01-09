@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         B&M Scriptmanager (V25.1 - UX Fixes)
+// @name         B&M Scriptmanager (V25.2 - Logic Fix)
 // @namespace    https://github.com/taskforce-Nord/public
-// @version      25.1.0
-// @description  Fix: Repo-Manager öffnet sofort. Kein Seiten-Reload mehr beim Speichern von Tokens. High-Contrast UI.
+// @version      25.2.0
+// @description  Fix: "Selbstheilung" für gesperrte Skripte. Wenn Token da ist, wird Sperre ignoriert. High-Contrast UI.
 // @author       B&M
 // @match        https://www.leitstellenspiel.de/*
 // @grant        GM_xmlhttpRequest
@@ -365,6 +365,9 @@
             const detailsMap = new Map();
             let hasUpdates = false;
 
+            const pToken = GM_getValue(GM_TOKEN_KEY, "");
+            const customRepos = JSON.parse(GM_getValue(GM_CUSTOM_REPOS_KEY, "[]"));
+
             online.forEach(meta => {
                 scriptMetadataCache[meta.name] = meta;
                 const loc = local.find(s => s.name === meta.name);
@@ -384,9 +387,23 @@
                     if (loc.hasSettings) meta.hasSettings = true;
                 }
 
-                if (meta.authSuspended || (loc && loc.authSuspended)) {
+                // SELF-HEALING AUTH CHECK
+                // Wir prüfen hier nochmal: Hat das Repo des Scripts JETZT einen Token?
+                let hasValidToken = false;
+                if(meta.repoInfo.owner === PRIMARY_REPO.owner && meta.repoInfo.name === PRIMARY_REPO.name) {
+                    hasValidToken = !!pToken;
+                } else {
+                    const cr = customRepos.find(r => r.owner === meta.repoInfo.owner && r.name === meta.repoInfo.name);
+                    if(cr && cr.token) hasValidToken = true;
+                }
+
+                // Wenn gesperrt WAR, aber jetzt Token da -> Freigeben!
+                if ((meta.authSuspended || (loc && loc.authSuspended)) && !hasValidToken) {
                     state = 'inactive'; meta.authSuspended = true;
                     info = `<strong style="color:var(--danger-color)">GESPERRT (Token Fehler)</strong><br>${info}`;
+                } else {
+                    // Explizit entsperren
+                    meta.authSuspended = false;
                 }
 
                 if (!scriptStates[meta.name]) {
@@ -485,6 +502,7 @@
             div.title = item.info.replace(/<[^>]*>?/gm, '');
 
             if (!item.meta.authSuspended) {
+                // DELETE BUTTON (X)
                 if (['active', 'update', 'inactive', 'downgrade', 'uninstall_pending'].includes(item.state)) {
                     const del = document.createElement('span');
                     del.className = 'bm-del-btn';
@@ -580,7 +598,7 @@
             setTimeout(() => { if(btn) btn.disabled = false; }, 1000);
         },
 
-        // --- REPO MANAGER UI (FIXED VISIBILITY) ---
+        // --- REPO MANAGER UI ---
         _createRepoManagerUI: function() {
             if (repoModalUiCreated) {
                 document.getElementById('bm-repo-modal').style.display = 'flex';
@@ -664,7 +682,7 @@
                 }, 800);
             };
 
-            // SHOW
+            // Immediately show on creation
             div.style.display = 'flex';
         },
 
