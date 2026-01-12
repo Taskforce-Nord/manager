@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         B&M Scriptmanager (V26.3 - Setup Reload Fix)
+// @name         B&M Scriptmanager (V27.0 - Zombie/Archiv Fix)
 // @namespace    https://github.com/taskforce-Nord/public
-// @version      26.3.0
-// @description  Fix: Nach erster Token-Eingabe wird die Seite neu geladen, damit der Menüpunkt erscheint.
+// @version      27.0.0
+// @description  Erkennt gelöschte Server-Skripte ("Zombies") und erlaubt deren Deinstallation via "Archiv"-Tab.
 // @author       B&M
 // @match        https://www.leitstellenspiel.de/*
 // @grant        GM_xmlhttpRequest
@@ -108,25 +108,26 @@
         initSystem: async function() {
             try {
                 const token = GM_getValue(GM_TOKEN_KEY, "");
+                // Initial Check without blocking (Setup handles display)
                 const access = await this._checkRepoAccess(PRIMARY_REPO.owner, PRIMARY_REPO.name, token);
-
                 if (access === 'DENIED') {
-                    console.error("[B&M] Primary Access Denied.");
+                    console.error("[B&M] Access Denied.");
                     this._showSetupScreen("Zugriff verweigert.<br>Bitte Haupt-Token prüfen.");
                     return; 
                 }
 
                 await this.openDatabase();
                 await this._executeInstalledScripts(token);
-                this._initUIHooks(); // Menüpunkt erstellen
+                this._initUIHooks();
                 this.checkForUpdatesInBackground();
                 
             } catch (e) { console.error("[B&M Init Error]", e); }
         },
 
         _checkRepoAccess: function(owner, name, token) {
+            if (!token) return Promise.resolve('DENIED'); // Early exit
             const url = `https://api.github.com/repos/${owner}/${name}/contents/manifest.json`;
-            const headers = token ? { "Authorization": `token ${token}` } : {};
+            const headers = { "Authorization": `token ${token}` };
             return new Promise(resolve => {
                 GM_xmlhttpRequest({
                     method: "GET", url: url, headers: headers,
@@ -160,7 +161,6 @@
             if (!db) return;
             const scripts = await this.getScriptsFromDB();
             let count = 0;
-            
             const customRepos = JSON.parse(GM_getValue(GM_CUSTOM_REPOS_KEY, "[]"));
 
             for (const script of scripts.filter(s => s.isActive !== false)) {
@@ -334,7 +334,7 @@
                 const results = await Promise.all([p1, ...pCustom]);
                 const allOnline = results.flat();
 
-                // 4. Deduplicate
+                // 4. Deduplicate (Highest Version wins)
                 const mergedMap = new Map();
                 allOnline.forEach(script => {
                     if (!mergedMap.has(script.name)) {
@@ -373,6 +373,7 @@
             const pToken = GM_getValue(GM_TOKEN_KEY, "");
             const customRepos = JSON.parse(GM_getValue(GM_CUSTOM_REPOS_KEY, "[]"));
 
+            // 1. Process Online Scripts
             online.forEach(meta => {
                 scriptMetadataCache[meta.name] = meta;
                 const loc = local.find(s => s.name === meta.name);
@@ -392,11 +393,10 @@
                     if (loc.hasSettings) meta.hasSettings = true;
                 }
                 
-                // SELF-HEALING
+                // Self-Healing Auth
                 let hasValidToken = false;
-                if(meta.repoInfo.owner === PRIMARY_REPO.owner && meta.repoInfo.name === PRIMARY_REPO.name) {
-                    hasValidToken = !!pToken;
-                } else {
+                if(meta.repoInfo.owner === PRIMARY_REPO.owner && meta.repoInfo.name === PRIMARY_REPO.name) hasValidToken = !!pToken;
+                else {
                     const cr = customRepos.find(r => r.owner === meta.repoInfo.owner && r.name === meta.repoInfo.name);
                     if(cr && cr.token) hasValidToken = true;
                 }
@@ -423,6 +423,37 @@
                 });
             });
 
+            // 2. DETECT ZOMBIES (Local scripts not in online list)
+            local.forEach(loc => {
+                // If not found in the online map
+                if (!online.find(on => on.name === loc.name)) {
+                    
+                    // Create Pseudo-Meta for the Zombie
+                    const zombieMeta = {
+                        name: loc.name,
+                        version: loc.version,
+                        description: "Dieses Skript ist auf dem Server nicht mehr verfügbar. Bitte deinstallieren.",
+                        categories: ["Archiv / Entfernt"],
+                        isZombie: true,
+                        repoInfo: loc.repoInfo || { label: 'Unbekannt' }
+                    };
+                    
+                    scriptMetadataCache[loc.name] = zombieMeta;
+                    
+                    // Force state to 'orphan' if not already handled
+                    if (!scriptStates[loc.name]) {
+                        scriptStates[loc.name] = 'orphan';
+                        initialScriptStates[loc.name] = 'orphan';
+                    }
+
+                    const item = { meta: zombieMeta, info: zombieMeta.description, state: scriptStates[loc.name] };
+                    detailsMap.set(loc.name, item);
+                    
+                    if(!categoryMap.has("Archiv / Entfernt")) categoryMap.set("Archiv / Entfernt", []);
+                    categoryMap.get("Archiv / Entfernt").push(item);
+                }
+            });
+
             // TABS
             const tabsBar = document.createElement('div');
             tabsBar.className = 'bm-tabs';
@@ -443,6 +474,10 @@
             }
 
             const sortedCats = [...categoryMap.keys()].sort();
+            // Move "Archiv" to end if exists
+            const archivIdx = sortedCats.indexOf("Archiv / Entfernt");
+            if(archivIdx > -1) { sortedCats.push(sortedCats.splice(archivIdx, 1)[0]); }
+
             sortedCats.forEach(cat => {
                 const count = categoryMap.get(cat).length;
                 const tab = document.createElement('div');
@@ -490,6 +525,18 @@
         createUIElement: function(item) {
             const div = document.createElement('div');
             div.className = `script-button ${item.state}`;
+            
+            // ZOMBIE STYLING
+            if (item.meta.isZombie) {
+                div.style.background = "#222";
+                div.style.borderColor = "#444";
+                div.style.color = "#777";
+                if(item.state === 'uninstall_pending') {
+                    div.style.background = "var(--danger-color)";
+                    div.style.color = "white";
+                }
+            }
+
             if(item.meta.authSuspended) div.style.opacity = '0.5';
             
             div.dataset.scriptName = item.meta.name.toLowerCase();
@@ -499,13 +546,14 @@
             
             if (item.state === 'install_pending') label = `<strong>${item.meta.name}</strong><div class="version" style="background:var(--pending-cyan); color:black;">Wird installiert</div>`;
             else if (item.state === 'uninstall_pending') label = `<strong><strike>${item.meta.name}</strike></strong><div class="version" style="background:var(--danger-color); color:white;">Wird gelöscht</div>`;
+            else if (item.state === 'orphan') label = `<strong>${item.meta.name}</strong><div class="version">Nicht verfügbar</div>`;
 
             div.innerHTML = label;
             div.title = item.info.replace(/<[^>]*>?/gm, '');
 
             if (!item.meta.authSuspended) {
-                // DELETE BUTTON (X)
-                if (['active', 'update', 'inactive', 'downgrade', 'uninstall_pending'].includes(item.state)) {
+                // DELETE BUTTON (X) - ALLOWED FOR ORPHANS TOO
+                if (['active', 'update', 'inactive', 'downgrade', 'uninstall_pending', 'orphan'].includes(item.state)) {
                     const del = document.createElement('span');
                     del.className = 'bm-del-btn';
                     del.innerHTML = '✖';
@@ -524,7 +572,8 @@
                     };
                     div.appendChild(del);
                 }
-                if (['active', 'update'].includes(item.state) && item.meta.hasSettings) {
+                // Config not allowed for orphans
+                if (['active', 'update'].includes(item.state) && item.meta.hasSettings && !item.meta.isZombie) {
                     const cfg = document.createElement('span');
                     cfg.className = 'bm-config-btn';
                     cfg.innerHTML = '⚙️';
@@ -534,8 +583,9 @@
             }
 
             div.onclick = () => {
-                if(item.meta.authSuspended) { alert("Skript gesperrt. Bitte Token prüfen."); return; }
+                if(item.meta.authSuspended) { alert("Skript gesperrt."); return; }
                 if(item.state === 'uninstall_pending') return; 
+                if(item.meta.isZombie) { alert("Dieses Skript existiert nicht mehr auf dem Server. Bitte löschen (X)."); return; }
 
                 const current = item.state;
                 let next = current;
@@ -576,7 +626,14 @@
                 btn.textContent = `Speichere ${i+1}/${changes.length}: ${name}...`;
                 try {
                     const meta = scriptMetadataCache[name];
-                    if (state === 'install_pending' || state === 'activate' || state === 'update' || state === 'downgrade' || state === 'active') {
+                    
+                    if (state === 'uninstall') {
+                        // Safe uninstall for both normal and zombie scripts
+                        await this.deleteScriptFromDB(name);
+                    } else if (meta.isZombie) {
+                        // Safety Check: Should not happen
+                        console.warn("Versuch, einen Zombie zu installieren.");
+                    } else if (state === 'install_pending' || state === 'activate' || state === 'update' || state === 'downgrade' || state === 'active') {
                         const res = await this.fetchRawScript(meta.dirName, meta.fullName, meta.repoInfo);
                         if (res.success) {
                             const hasCfg = this.codeHasSettings(res.content);
@@ -587,9 +644,7 @@
                     } else if (state === 'inactive') {
                         const local = await this.getSingleScriptFromDB(name);
                         if(local) { local.isActive = false; await this.saveScriptToDB(local); }
-                    } else if (state === 'uninstall') {
-                        await this.deleteScriptFromDB(name);
-                    }
+                    } 
                 } catch(e) { errors.push(`${name}: ${e.message}`); }
             }
 
@@ -600,7 +655,7 @@
             setTimeout(() => { if(btn) btn.disabled = false; }, 1000);
         },
 
-        // --- REPO MANAGER UI (VALIDATED & RELOAD ON SAVE) ---
+        // --- REPO MANAGER UI (FOOLPROOF & VALIDATED) ---
         _createRepoManagerUI: function() {
             if (repoModalUiCreated) { 
                 document.getElementById('bm-repo-modal').style.display = 'flex'; 
@@ -676,7 +731,7 @@
                 document.getElementById('bm-new-token').value = "";
             };
 
-            // SAVE AND RELOAD
+            // VALIDATE & SAVE & RELOAD
             document.getElementById('bm-repo-save').onclick = async () => {
                 const btn = document.getElementById('bm-repo-save');
                 const oldText = btn.textContent;
@@ -707,13 +762,10 @@
                 GM_setValue(GM_TOKEN_KEY, pToken);
                 localStorage.setItem(LS_ACCESS_KEY, `${pToken}@${PRIMARY_REPO.path}`);
                 
-                // FULL RELOAD
                 btn.style.background = "var(--success-color)";
                 btn.textContent = "Erfolg! Seite lädt neu...";
                 
-                setTimeout(() => { 
-                    location.reload(); // Hard Refresh to init hooks
-                }, 1000);
+                setTimeout(() => { location.reload(); }, 1000);
             };
             
             div.style.display = 'flex';
