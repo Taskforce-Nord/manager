@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         B&M Scriptmanager (V27.1 - Manual Update)
-// @namespace    https://github.com/taskforce-Nord/public
-// @version      27.1.0
-// @description  Erkennt gelöschte Server-Skripte ("Zombies"), erlaubt deren Deinstallation und zeigt HTML-Anleitungen an.
+// @name         B&M Scriptmanager (V27.3 - Manual Integrated)
+// @namespace    https://github.com/taskforce-Nord/manager
+// @version      27.3.0
+// @description  Erkennt gelöschte Server-Skripte ("Zombies"), erlaubt deren Deinstallation und zeigt HTML-Anleitungen an. Jetzt mit integriertem Handbuch.
 // @author       B&M
 // @match        https://www.leitstellenspiel.de/*
 // @grant        GM_xmlhttpRequest
@@ -33,6 +33,149 @@
     const GM_CUSTOM_REPOS_KEY = "bm_custom_repos";
     const LS_ACCESS_KEY = "bm_access_cfg";
 
+    // --- INTEGRIERTES HANDBUCH (SARCASTIC EDITION) ---
+    const MANAGER_MANUAL_HTML = `
+    <style>
+        .bm-manual-scope {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: #eeeeee;
+            line-height: 1.6;
+            padding: 10px;
+        }
+        .bm-manual-scope .container {
+            max-width: 100%;
+            margin: 0 auto;
+            background-color: #2c313a;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+            border: 1px solid #444c5e;
+            box-sizing: border-box;
+        }
+        .bm-manual-scope h1 {
+            color: #0d6efd;
+            border-bottom: 2px solid #0d6efd;
+            padding-bottom: 10px;
+            text-align: center;
+            margin-top: 0;
+        }
+        .bm-manual-scope h2 { color: #17a2b8; margin-top: 30px; border-bottom: 1px solid #444; padding-bottom: 5px; }
+        .bm-manual-scope h3 { color: #fff; margin-top: 20px; }
+        .bm-manual-scope .note {
+            background-color: #323a45;
+            border-left: 4px solid #f0ad4e;
+            padding: 15px;
+            margin: 20px 0;
+            font-style: italic;
+            color: #aaa;
+        }
+        .bm-manual-scope .step {
+            background-color: #222;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 15px;
+            border: 1px solid #444;
+        }
+        .bm-manual-scope .step strong { color: #fff; display: block; margin-bottom: 5px; }
+        .bm-manual-scope code {
+            background-color: #000;
+            color: #0d6efd;
+            padding: 2px 5px;
+            border-radius: 3px;
+            font-family: monospace;
+        }
+        .bm-manual-scope .btn-mock {
+            display: inline-block; padding: 5px 10px; border-radius: 4px;
+            font-weight: bold; font-size: 0.9em; margin: 2px;
+        }
+        .bm-manual-scope .blue { background-color: #0d6efd; color: white; }
+        .bm-manual-scope .grey { background-color: #5a6268; color: white; }
+        .bm-manual-scope .green { background-color: #28a745; color: white; }
+        .bm-manual-scope .orange { background: linear-gradient(135deg, #f0ad4e, #e0a800); color: #222; }
+        .bm-manual-scope a { color: #0d6efd; text-decoration: none; }
+        .bm-manual-scope a:hover { text-decoration: underline; }
+        .bm-manual-scope .sarcasm-warning {
+            font-size: 0.8em; text-align: center; color: #666; margin-top: 50px; border-top: 1px dashed #444; padding-top: 10px;
+        }
+    </style>
+
+    <div class="bm-manual-scope">
+        <div class="container">
+            <h1>B&M Scriptmanager</h1>
+            <p style="text-align: center;"><em>Das Handbuch für Auserwählte (und solche, die es werden wollen).</em></p>
+
+            <div class="note">
+                <strong>Vorab-Info:</strong> Wir gehen davon aus, dass du weißt, wie man einen Computer einschaltet. Wenn du bei "Tampermonkey" an exotische Zoo-Tiere denkst, bist du hier falsch.
+            </div>
+
+            <h2>1. Die Installation: Glückwunsch!</h2>
+            <div class="step">
+                Da du diesen Text gerade <strong>im</strong> Manager liest, hast du die Installation offensichtlich schon geschafft.
+                <br><br>
+                Wir sind stolz auf dich. Ein dressierter Schimpanse hätte es zwar auch hinbekommen, aber wir wollen deine Leistung nicht schmälern. Atme durch, der schwierigste Teil ist vorbei.
+            </div>
+
+            <h2>2. Der VIP-Ausweis (Der Token)</h2>
+            <p>Jetzt wird es ernst. Da unsere Skripte so gut sind, dass andere sie gerne als ihre eigenen ausgeben würden, haben wir eine Türsteher-Funktion eingebaut. Wir nennen das "Geistiges Eigentum schützen", du nennst es "Warum muss ich so ein langes Passwort eingeben?".</p>
+
+            <div class="step">
+                <strong>Schritt A: Setup-Bildschirm</strong>
+                Wenn du beim Start einen roten Warnhinweis gesehen hast, hast du ihn hoffentlich angeklickt. Wenn alles läuft: Ignoriere diesen Punkt.
+            </div>
+
+            <div class="step">
+                <strong>Schritt B: Der Schlüssel (GitHub PAT)</strong>
+                Du benötigst deinen persönlichen Zugangsschlüssel (Token).
+                <ul>
+                    <li>Hast du einen bekommen? <strong>Gut.</strong></li>
+                    <li>Hast du keinen? <strong>Pech.</strong> Frag höflich bei der Leitung nach. Betteln kann helfen.</li>
+                </ul>
+                Wenn die Lämpchen im Manager leuchten, hast du das bereits erledigt.
+            </div>
+
+            <h2>3. Die Bedienung: Malen nach Zahlen</h2>
+
+            <h3>Die Farbenlehre</h3>
+            <p>Wir haben das Interface so gestaltet, dass du es auch ohne Design-Studium verstehst. Es gibt bunte Kästchen:</p>
+
+            <ul>
+                <li><span class="btn-mock grey">Grau (Dunkel)</span>: Das Skript schläft. Es ist installiert, aber aus. Es tut nichts.</li>
+                <li><span class="btn-mock blue">Blau (Leuchtend)</span>: Das Skript ist <strong>AKTIV</strong>. Es arbeitet für dich. Sei dankbar.</li>
+                <li><span class="btn-mock green">Grün (Installieren)</span>: Du hast es noch nicht, aber du könntest es haben.</li>
+                <li><span class="btn-mock orange">Gelb/Orange</span>: Ein Update! Wir waren fleißig. <strong>Fass das Kästchen nicht an!</strong> Das Update ist schon vorgemerkt. Du musst nur unten auf den Speicher-Knopf hämmern.</li>
+            </ul>
+
+            <h3>Ein- und Ausschalten</h3>
+            <p>Klick auf ein Kästchen (außer bei Updates, siehe oben). Die Farbe ändert sich. Magie.</p>
+            <p><strong>WICHTIG:</strong> Das Klicken ändert erst einmal nur die Farbe im Manager. Damit das Spiel das auch kapiert, musst du ganz unten auf den riesigen, kaum zu übersehenden Balken klicken:</p>
+            <p style="text-align: center;"><span class="btn-mock blue" style="padding: 15px; font-size: 1.2em;">Änderungen anwenden</span></p>
+            <p>Wer diesen Knopf nicht drückt und sich beschwert, dass nichts passiert, muss einen Kuchen ausgeben.</p>
+
+            <h2>4. Profi-Funktionen (Vorsicht!)</h2>
+
+            <div class="step">
+                <strong>Das Zahnrad (⚙️)</strong>
+                Manche Skripte haben Einstellungen. Wenn du auf das kleine Zahnrad im Skript-Kästchen klickst, kannst du Dinge verstellen. Wenn du danach nicht mehr weißt, was du getan hast: Wir wissen es auch nicht.
+            </div>
+
+            <div class="step">
+                <strong>Zombies & Das Archiv</strong>
+                Manchmal löschen wir Skripte vom Server, weil sie alt sind oder schlecht riechen. Dein Manager erkennt diese "Zombies" (Leichen im Keller). Du findest diese im Tab "Archiv / Entfernt". Bitte drück dort das kleine <strong>X</strong>, um sie zu beerdigen. Lass los. Es ist vorbei.
+            </div>
+
+            <h2>5. Fehlerbehebung</h2>
+            <p><strong>"Es geht nicht!"</strong><br>
+            Hast du einen Token? Ist er gültig? Hast du gespeichert? Hast du die Seite neu geladen? Hast du den Computer an?</p>
+
+            <p><strong>"Ich sehe nur Rot!"</strong><br>
+            Dann ist dein Token falsch oder abgelaufen. Zurück zu Schritt 2. Geh nicht über Los.</p>
+
+            <div class="sarcasm-warning">
+                Disclaimer: Dieses Handbuch wurde mit viel Liebe und wenig Geduld erstellt. Bei Risiken und Nebenwirkungen friss die Packungsbeilage oder frag deinen B&M Administrator.
+            </div>
+        </div>
+    </div>`;
+
     // Globals
     let scriptStates = {};
     let initialScriptStates = {};
@@ -41,7 +184,7 @@
     let managerUiCreated = false;
     let settingsModalUiCreated = false;
     let repoModalUiCreated = false;
-    let manualModalUiCreated = false; // NEU
+    let manualModalUiCreated = false;
 
     let activeTab = 'Alle';
     let cachedScriptData = { online: [], local: [] };
@@ -309,9 +452,9 @@
                  this._createManagerUI();
             }
 
-            const scriptList = document.getElementById('script-list');
+            const gridArea = document.getElementById('bm-grid-area');
             if(cachedScriptData.online.length === 0 || forceRefresh) {
-                scriptList.innerHTML = '<div class="bm-loader-container"><div class="bm-loader"></div> Lade Daten...</div>';
+                gridArea.innerHTML = '<div class="bm-loader-container"><div class="bm-loader"></div> Lade Daten...</div>';
             }
 
             if (forceRefresh) {
@@ -356,15 +499,19 @@
                 this._renderTabsAndContent();
 
             } catch (e) {
-                scriptList.innerHTML = `<p style="color:var(--danger-color); text-align:center;">Fehler: ${e.message}</p>`;
+                gridArea.innerHTML = `<p style="color:var(--danger-color); text-align:center;">Fehler: ${e.message}</p>`;
                 throw e;
             }
         },
 
         _renderTabsAndContent: function() {
             const { online, local } = cachedScriptData;
-            const container = document.getElementById('script-list');
-            container.innerHTML = '';
+
+            const tabsContainer = document.getElementById('bm-tabs-area');
+            const gridContainer = document.getElementById('bm-grid-area');
+
+            tabsContainer.innerHTML = '';
+            gridContainer.innerHTML = '';
 
             const categoryMap = new Map();
             const detailsMap = new Map();
@@ -451,7 +598,7 @@
                 }
             });
 
-            // TABS
+            // TABS (Render in Header)
             const tabsBar = document.createElement('div');
             tabsBar.className = 'bm-tabs';
 
@@ -482,9 +629,9 @@
                 tab.onclick = () => this._switchTab(cat);
                 tabsBar.appendChild(tab);
             });
-            container.appendChild(tabsBar);
+            tabsContainer.appendChild(tabsBar);
 
-            // GRID
+            // GRID (Render in Scrollable Body)
             const grid = document.createElement('div');
             grid.className = 'bm-category-grid';
 
@@ -501,7 +648,7 @@
             if (itemsToShow.length === 0) grid.innerHTML = '<p style="padding:20px; color:var(--text-muted); grid-column:1/-1;">Keine Skripte in dieser Ansicht.</p>';
             else itemsToShow.forEach(item => grid.appendChild(this.createUIElement(item)));
 
-            container.appendChild(grid);
+            gridContainer.appendChild(grid);
 
             const btn = document.getElementById('save-scripts-button');
             if(btn.textContent.indexOf("Gespeichert") === -1) { btn.textContent = "Änderungen anwenden"; btn.disabled = false; }
@@ -809,7 +956,7 @@
             });
         },
 
-        // --- MANUAL / ANLEITUNG UI (NEU) ---
+        // --- MANUAL / ANLEITUNG UI ---
         _createManualModalUI: function() {
             if (manualModalUiCreated) return;
             const div = document.createElement('div');
@@ -819,7 +966,7 @@
             div.innerHTML = `
                 <div class="bm-settings-content" style="max-width: 900px; height: 85vh; display:flex; flex-direction:column;">
                     <div class="bm-settings-header">📖 Anleitung</div>
-                    <div id="bm-manual-body" class="bm-settings-body" style="flex:1; overflow-y:auto; padding:20px; background:#fff; color:#222; border-radius:4px;">
+                    <div id="bm-manual-body" class="bm-settings-body" style="flex:1; overflow-y:auto; padding:0; background:#fff; color:#222; border-radius:4px;">
                         Lade Inhalt...
                     </div>
                     <div class="bm-settings-footer">
@@ -839,7 +986,7 @@
             const body = document.getElementById('bm-manual-body');
 
             header.textContent = `📖 Anleitung: ${scriptName}`;
-            body.innerHTML = htmlContent; // HTML DIREKT EINFÜGEN
+            body.innerHTML = htmlContent;
 
             modal.style.display = 'flex';
         },
@@ -915,33 +1062,46 @@
             };
         },
 
-        // --- MANAGER UI ---
+        // --- MANAGER UI (FIXED HEADER) ---
         _createManagerUI: function() {
             if (managerUiCreated) return;
             const div = document.createElement('div');
             div.id = 'lss-script-manager-container';
             div.innerHTML = `
-                <span class="bm-close-btn">&times;</span>
-                <div class="bm-modal-content">
+                <div class="bm-manager-header">
+                    <span class="bm-close-btn">&times;</span>
                     <h3>B&M Scriptmanager</h3>
                     <div class="bm-toolbar">
                         <input type="text" id="bm-script-filter" placeholder="Suche...">
                         <div class="bm-toolbar-right">
                             <div id="bm-stats-bar">Lade Statistiken...</div>
                             <div class="bm-actions">
+                                <span id="bm-manager-manual-btn" title="Anleitung (Sarkasmus included)">📖</span>
                                 <span id="bm-token-btn" title="Repositories & Token">🔑</span>
                                 <span id="bm-refresh-btn" title="Reload">🔄</span>
                             </div>
                         </div>
                     </div>
-                    <div id="script-list"></div>
+                    <div id="bm-tabs-area"></div>
                 </div>
-                <button id="save-scripts-button" style="display:none;">Änderungen anwenden</button>
+
+                <div class="bm-manager-body">
+                     <div id="bm-grid-area"></div>
+                </div>
+
+                <div class="bm-manager-footer">
+                     <button id="save-scripts-button" style="display:none;">Änderungen anwenden</button>
+                </div>
             `;
             document.body.appendChild(div);
+
             div.querySelector('.bm-close-btn').onclick = () => location.reload();
             document.getElementById('bm-refresh-btn').onclick = () => this.loadAndDisplayScripts(true);
             document.getElementById('bm-token-btn').onclick = () => this._createRepoManagerUI();
+
+            // Manager Manual Handler
+            document.getElementById('bm-manager-manual-btn').onclick = () => this._showManualUI("B&M Manager", MANAGER_MANUAL_HTML);
+
             document.getElementById('save-scripts-button').addEventListener('click', () => this.applyChanges());
             document.getElementById('bm-script-filter').addEventListener('input', () => this._renderTabsAndContent());
             managerUiCreated = true;
@@ -975,24 +1135,48 @@
 
         #lss-script-manager-container, .bm-modal-overlay { font-family: var(--font-family); color: var(--text-main); font-size: 14px; }
 
+        /* RESTRUCTURED CONTAINER LAYOUT */
         #lss-script-manager-container {
             position: fixed; top: 8vh; left: 50%; transform: translateX(-50%); z-index: 10000;
             background-color: var(--bg-dark); border: 1px solid var(--border-color);
-            border-radius: 8px; padding: 20px; height: 80vh; width: 90%; max-width: 1200px;
+            border-radius: 8px; height: 80vh; width: 90%; max-width: 1200px;
             display: none; flex-direction: column; box-sizing: border-box;
             box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            overflow: hidden;
         }
         #lss-script-manager-container.visible { display: flex; }
 
-        .bm-modal-content {
-            flex-grow: 1; overflow-y: auto; min-height: 0; padding-right: 8px;
-            display: flex; flex-direction: column;
+        /* Sticky Header */
+        .bm-manager-header {
+            flex-shrink: 0;
+            padding: 20px 20px 0 20px;
+            background-color: var(--bg-dark);
+            border-bottom: 1px solid var(--border-color);
+            z-index: 20;
         }
 
-        .bm-modal-content::-webkit-scrollbar { width: 8px; }
-        .bm-modal-content::-webkit-scrollbar-track { background: var(--bg-dark); border-radius: 4px; }
-        .bm-modal-content::-webkit-scrollbar-thumb { background-color: var(--border-color); border-radius: 4px; }
+        /* Scrollable Body */
+        .bm-manager-body {
+            flex-grow: 1;
+            overflow-y: auto;
+            padding: 20px;
+            background: rgba(0,0,0,0.1);
+        }
 
+        /* Sticky Footer */
+        .bm-manager-footer {
+            flex-shrink: 0;
+            padding: 15px 20px;
+            background-color: var(--bg-dark);
+            border-top: 1px solid var(--border-color);
+        }
+
+        /* SCROLLBAR STYLING */
+        .bm-manager-body::-webkit-scrollbar, .bm-modal-content::-webkit-scrollbar, .bm-settings-body::-webkit-scrollbar { width: 8px; }
+        .bm-manager-body::-webkit-scrollbar-track, .bm-modal-content::-webkit-scrollbar-track, .bm-settings-body::-webkit-scrollbar-track { background: var(--bg-dark); }
+        .bm-manager-body::-webkit-scrollbar-thumb, .bm-modal-content::-webkit-scrollbar-thumb, .bm-settings-body::-webkit-scrollbar-thumb { background-color: var(--border-color); border-radius: 4px; }
+
+        /* HEADER STYLES */
         #lss-script-manager-container h3 {
             text-align: center; border-bottom: 2px solid var(--primary-blue);
             padding-bottom: 12px; margin: 0 0 20px 0; font-weight: 300; font-size: 1.8em; letter-spacing: 1px;
@@ -1012,22 +1196,20 @@
         }
         #bm-script-filter { width: 300px; }
         #bm-script-filter:focus, input:focus { outline: none; border-color: var(--primary-blue); box-shadow: 0 0 0 2px rgba(13,110,253,0.3); }
-        ::placeholder { color: #555; opacity: 1; }
 
         .bm-toolbar-right { display: flex; align-items: center; gap: 20px; }
         .bm-actions { display: flex; gap: 15px; }
 
-        #bm-refresh-btn, #bm-token-btn {
+        #bm-refresh-btn, #bm-token-btn, #bm-manager-manual-btn {
             font-size: 1.4em; cursor: pointer; color: var(--text-muted);
             transition: color 0.2s, transform 0.3s;
         }
-        #bm-refresh-btn:hover, #bm-token-btn:hover { color: var(--text-main); transform: scale(1.15); }
+        #bm-refresh-btn:hover, #bm-token-btn:hover, #bm-manager-manual-btn:hover { color: var(--text-main); transform: scale(1.15); }
 
         #bm-stats-bar { font-size: 0.9em; color: var(--text-muted); white-space: nowrap; }
 
         .bm-tabs {
             display: flex; flex-wrap: nowrap; width: 100%; gap: 2px;
-            border-bottom: 1px solid var(--border-color); margin-bottom: 20px;
             overflow: hidden;
         }
 
@@ -1081,7 +1263,7 @@
         .script-button:hover .bm-manual-btn { opacity: 1; }
         .bm-manual-btn:hover { transform: scale(1.2); cursor: pointer; }
 
-        #save-scripts-button { width: 100%; padding: 14px; margin-top: 15px; font-weight: bold; color: white; background-color: var(--primary-blue); border: none; border-radius: 6px; cursor: pointer; font-size: 1.1em; transition: background 0.2s; }
+        #save-scripts-button { width: 100%; padding: 14px; font-weight: bold; color: white; background-color: var(--primary-blue); border: none; border-radius: 6px; cursor: pointer; font-size: 1.1em; transition: background 0.2s; }
         #save-scripts-button:hover { background-color: var(--primary-blue-hover); }
         #save-scripts-button:disabled { background-color: var(--btn-secondary); cursor: not-allowed; }
 
