@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         B&M Scriptmanager (V27.3 - Manual Integrated)
-// @namespace    https://github.com/taskforce-Nord/manager
-// @version      27.3.0
-// @description  Erkennt gelöschte Server-Skripte ("Zombies"), erlaubt deren Deinstallation und zeigt HTML-Anleitungen an. Jetzt mit integriertem Handbuch.
+// @name         B&M Scriptmanager (V27.3 - Manual Integrated + Footer Version)
+// @namespace    https://github.com/taskforce-Nord/public
+// @version      27.3.1
+// @description  Erkennt gelöschte Server-Skripte ("Zombies"), erlaubt deren Deinstallation und zeigt HTML-Anleitungen an. Jetzt mit integriertem Handbuch und Version in der Fußzeile.
 // @author       B&M
 // @match        https://www.leitstellenspiel.de/*
 // @grant        GM_xmlhttpRequest
@@ -18,7 +18,9 @@
 (function() {
     'use strict';
 
-    // --- KONFIGURATION HAUPT-REPO ---
+    // --- KONFIGURATION ---
+    const SCRIPT_VERSION = "27.3.1"; // Version für Anzeige
+
     const PRIMARY_REPO = {
         owner: 'Taskforce-Nord',
         name: 'public',
@@ -1062,7 +1064,7 @@
             };
         },
 
-        // --- MANAGER UI (FIXED HEADER) ---
+        // --- MANAGER UI (FIXED HEADER + FOOTER VERSION) ---
         _createManagerUI: function() {
             if (managerUiCreated) return;
             const div = document.createElement('div');
@@ -1091,6 +1093,9 @@
 
                 <div class="bm-manager-footer">
                      <button id="save-scripts-button" style="display:none;">Änderungen anwenden</button>
+                     <div style="text-align: right; font-size: 0.7em; color: var(--text-muted); margin-top: 5px; opacity: 0.6;">
+                         v${SCRIPT_VERSION}
+                     </div>
                 </div>
             `;
             document.body.appendChild(div);
