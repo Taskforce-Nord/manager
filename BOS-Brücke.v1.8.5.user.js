@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         LSS & BOS-Fahrzeuge: Wachenbau-Brücke (Robust + Cache)
+// @name         LSS & BOS-Fahrzeuge: Wachenbau-Brücke (v2.0 - Radar)
 // @namespace    http://tampermonkey.net/
-// @version      1.8
-// @description  Verbindet BOS-Fahrzeuge mit LSS. Robuster Marker-Check & Manueller Cache.
+// @version      2.0
+// @description  Verbindet BOS-Fahrzeuge mit LSS. Mit 600m-Radar, Distanzanzeige und Sofort-Cache-Update.
 // @author       Gemini (Idee von Whice/Masklin/User)
 // @match        https://*.leitstellenspiel.de/
 // @match        https://www.leitstellenspiel.de/
@@ -24,7 +24,8 @@
     const CACHE_DATE_KEY = 'bos_lss_cache_date';
     const PROJECT_NAME = '🚒 BOS-Brücke';
 
-    const RADIUS_TOLERANCE = 0.001; // ~100m
+    // Radius drastisch erhöht auf ca. 600m (0.006 Grad) um Ungenauigkeiten abzufangen
+    const RADIUS_TOLERANCE = 0.006; 
 
     // ---------------------------------------------------------
     // TEIL A: KONFIGURATION & HELPER
@@ -52,15 +53,59 @@
         return null;
     }
 
-    function checkDuplication(lat, lon, newTypeId, userBuildings) {
-        if (!userBuildings || userBuildings.length === 0) return false;
+    // Berechnet Distanz in Metern (grob) für Anzeige
+    function getDistanceInMeters(lat1, lon1, lat2, lon2) {
+        const R = 6371e3; // Erde Radius
+        const φ1 = lat1 * Math.PI/180;
+        const φ2 = lat2 * Math.PI/180;
+        const Δφ = (lat2-lat1) * Math.PI/180;
+        const Δλ = (lon2-lon1) * Math.PI/180;
+        const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
+                  Math.cos(φ1) * Math.cos(φ2) *
+                  Math.sin(Δλ/2) * Math.sin(Δλ/2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+        return Math.round(R * c);
+    }
 
-        const match = userBuildings.find(b =>
-            Math.abs(b.l - lat) < RADIUS_TOLERANCE &&
-            Math.abs(b.g - lon) < RADIUS_TOLERANCE &&
-            (newTypeId === null || b.t === newTypeId)
+    function checkDuplication(lat, lon, newTypeId, userBuildings) {
+        if (!userBuildings || userBuildings.length === 0) return null;
+        
+        // Wir suchen ALLE Gebäude im Radius
+        const matches = userBuildings.filter(b => 
+            Math.abs(b.l - lat) < RADIUS_TOLERANCE && 
+            Math.abs(b.g - lon) < RADIUS_TOLERANCE
         );
-        return match;
+
+        if (matches.length === 0) return null;
+
+        // Sortieren nach Distanz
+        matches.forEach(m => m.distance = getDistanceInMeters(lat, lon, m.l, m.g));
+        matches.sort((a, b) => a.distance - b.distance);
+
+        // 1. Priorität: Gleicher Typ und nah
+        const sameType = matches.find(m => (newTypeId !== null && m.t === newTypeId));
+        if (sameType) return sameType;
+
+        // 2. Priorität: Irgendein Gebäude sehr nah (< 150m)
+        if (matches[0].distance < 150) return matches[0];
+
+        return null;
+    }
+
+    // Fügt ein gebautes Gebäude sofort dem Cache hinzu (Optimistic UI)
+    function addToLocalCache(name, lat, lon, type) {
+        const cacheRaw = GM_getValue(CACHE_KEY, '[]');
+        let userBuildings = JSON.parse(cacheRaw);
+        
+        userBuildings.push({
+            l: lat,
+            g: lon,
+            n: name,
+            t: type
+        });
+        
+        GM_setValue(CACHE_KEY, JSON.stringify(userBuildings));
+        console.log(`${PROJECT_NAME}: Lokalen Cache optimistisch aktualisiert: ${name}`);
     }
 
     function geocodeAndSend(address, name, typeId, btnElement) {
@@ -83,20 +128,23 @@
                         const duplicate = checkDuplication(lat, lon, typeId, userBuildings);
 
                         if (duplicate && !btnElement.dataset.confirmed) {
-                            btnElement.innerHTML = '⚠️ Existiert schon! (Trotzdem?)';
-                            btnElement.style.backgroundColor = '#f0ad4e';
-                            btnElement.title = `Gleicher Typ in der Nähe gefunden: "${duplicate.n}"`;
+                            // Text anpassen je nach Distanz
+                            const distText = duplicate.distance ? `(~${duplicate.distance}m)` : '';
+                            btnElement.innerHTML = `⚠️ Existiert? ${distText}`;
+                            btnElement.style.backgroundColor = '#f0ad4e'; 
+                            btnElement.title = `Gefunden: "${duplicate.n}" in ${duplicate.distance}m Entfernung.`;
                             btnElement.dataset.confirmed = "true";
                             btnElement.disabled = false;
-                            return;
+                            return; 
                         }
 
                         if (btnElement) {
                             btnElement.innerHTML = '✅ Gesendet!';
                             btnElement.style.backgroundColor = '#5cb85c';
-                            btnElement.dataset.confirmed = "";
+                            btnElement.dataset.confirmed = ""; 
                         }
 
+                        // COMMAND SENDEN
                         GM_setValue(CHANNEL, JSON.stringify({
                             action: 'buildFromBOS',
                             name: name,
@@ -105,6 +153,9 @@
                             buildingType: typeId,
                             ts: new Date().getTime()
                         }));
+
+                        // CACHE SOFORT UPDATE
+                        addToLocalCache(name, lat, lon, typeId);
 
                         if (btnElement) {
                             setTimeout(() => {
@@ -130,28 +181,27 @@
     // TEIL B: LEITSTELLENSPIEL
     // ---------------------------------------------------------
     if (window.location.host.includes('leitstellenspiel.de')) {
-
+        
         async function updateCache(buttonElement) {
             if(buttonElement) {
                 buttonElement.innerHTML = '⏳ Lade...';
                 buttonElement.style.cursor = 'wait';
             }
-
+            
             try {
                 const response = await fetch('/api/buildings');
                 if (response.ok) {
                     const data = await response.json();
-
-                    // Minified Storage: l=lat, g=long, n=name, t=type
+                    
                     const lightData = data.map(b => ({
                         l: parseFloat(b.latitude),
                         g: parseFloat(b.longitude),
                         n: b.caption,
                         t: b.building_type
                     }));
-
+                    
                     GM_setValue(CACHE_KEY, JSON.stringify(lightData));
-
+                    
                     const now = new Date();
                     const dateStr = now.toLocaleDateString() + ' ' + now.toLocaleTimeString();
                     GM_setValue(CACHE_DATE_KEY, dateStr);
@@ -276,38 +326,36 @@
             addressTag.parentNode.appendChild(btn);
         }
 
-        // --- VERBESSERTE MARKER LOGIK ---
         function initMapPoller() {
             setInterval(() => {
-                // Wir suchen nach ALLEN Elementen mit der ID (falls Google alte Instanzen im DOM lässt)
-                // oder nach dem spezifischen Container-Div
                 const markerWindows = document.querySelectorAll('#marker-window');
-
+                
                 markerWindows.forEach(markerWindow => {
-                    // 1. Prüfen: Haben wir den Button hier schon eingebaut?
-                    if (markerWindow.querySelector('.bos-lss-btn')) return;
-
-                    // 2. Prüfen: Ist der Link (unser Anker) da?
-                    // Das HTML zeigt: <a href="/wachen/...">
                     const detailLink = markerWindow.querySelector('a[href^="/wachen/"]');
                     if (!detailLink) return;
-
-                    // 3. Prüfen: Ist dieses Fenster überhaupt sichtbar?
-                    // offsetParent ist null, wenn display:none gesetzt ist (z.B. bei geschlossenen/gecacheden Fenstern)
                     if (detailLink.offsetParent === null) return;
 
-                    // Alles OK -> Button rein!
-                    injectButtonIntoModal(detailLink);
+                    if (!markerWindow.querySelector('.bos-lss-btn')) {
+                        injectButtonIntoModal(detailLink);
+                    }
+                    
+                    // RESIZE FIX
+                    const scrollContainer = markerWindow.parentElement.parentElement;
+                    if (scrollContainer && scrollContainer.style.height === '110px') {
+                        scrollContainer.style.height = 'auto'; 
+                        scrollContainer.style.minHeight = '165px';
+                        scrollContainer.style.overflow = 'visible'; 
+                    }
                 });
-            }, 500); // Takt auf 500ms erhöht für schnellere Reaktion
+            }, 500); 
         }
 
         function injectButtonIntoModal(detailLink) {
             const btn = createBuildButton();
-            btn.classList.add('bos-lss-btn'); // WICHTIG: Klasse für den Poller
-            btn.style.marginTop = '8px';
+            btn.classList.add('bos-lss-btn');
+            btn.style.marginTop = '8px'; 
             btn.style.width = '100%';
-
+            
             btn.addEventListener('click', (e) => {
                 e.preventDefault(); e.stopPropagation();
                 if (btn.dataset.confirmed) {
@@ -317,8 +365,7 @@
                 btn.innerHTML = '⏳ Hole Daten...'; btn.disabled = true;
                 fetchAndProcess(detailLink, btn);
             });
-
-            // Fügt den Button direkt unter dem Link ein
+            
             detailLink.parentNode.insertBefore(btn, detailLink.nextSibling);
         }
 
