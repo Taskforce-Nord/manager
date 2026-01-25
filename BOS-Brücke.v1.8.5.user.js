@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         LSS & BOS-Fahrzeuge: Wachenbau-Brücke (v2.0 - Radar)
 // @namespace    http://tampermonkey.net/
-// @version      2.0
+// @version      1.8.5
 // @description  Verbindet BOS-Fahrzeuge mit LSS. Mit 600m-Radar, Distanzanzeige und Sofort-Cache-Update.
-// @author       Gemini (Idee von Whice/Masklin/User)
+// @author       Masklin
 // @match        https://*.leitstellenspiel.de/
 // @match        https://www.leitstellenspiel.de/
 // @match        https://bos-fahrzeuge.info/*
