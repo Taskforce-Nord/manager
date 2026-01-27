@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         B&M Scriptmanager (V27.3 - Manual Integrated + Footer Version)
+// @name         B&M Scriptmanager (V27.3.2 - Manual Integrated + Footer Version)
 // @namespace    https://github.com/taskforce-Nord/public
-// @version      27.3.1
+// @version      27.3.2
 // @description  Erkennt gelöschte Server-Skripte ("Zombies"), erlaubt deren Deinstallation und zeigt HTML-Anleitungen an. Jetzt mit integriertem Handbuch und Version in der Fußzeile.
 // @author       B&M
 // @match        https://www.leitstellenspiel.de/*
@@ -19,7 +19,7 @@
     'use strict';
 
     // --- KONFIGURATION ---
-    const SCRIPT_VERSION = "27.3.1"; // Version für Anzeige
+    const SCRIPT_VERSION = "27.3.2"; // Version für Anzeige
 
     const PRIMARY_REPO = {
         owner: 'Taskforce-Nord',
@@ -372,6 +372,10 @@
                 if (updateFound) {
                     const link = document.getElementById('b-m-scriptmanager-link');
                     if (link) link.classList.add('bm-update-highlight');
+                    
+                    // --- NEU: MARKIERUNG DES PROFILKOPFS ---
+                    const profileHead = document.getElementById('menu_profile');
+                    if (profileHead) profileHead.classList.add('bm-update-highlight');
                 }
             } catch (e) { }
         },
@@ -832,8 +836,7 @@
                         <div class="bm-repo-card primary" style="border-left: 4px solid var(--primary-blue); background: var(--bg-panel); padding: 15px; border-radius: 6px;">
                             <div class="bm-repo-title" style="color:var(--primary-blue); font-size:1.1em; margin-bottom:5px;">Haupt-Repository (Stable)</div>
                             <div style="font-size:0.9em; color:var(--text-muted); margin-bottom:10px;">
-                                Bitte hier deinen persönlichen <strong>GitHub Personal Access Token</strong> (Classic) eingeben.<br>
-                                Beginnt meist mit <code>github_pat_...</code> oder <code>ghp_...</code>
+                                Bitte hier deinen persönlichen <strong>GitHub Personal Access Token</strong> (Classic) eingeben.
                             </div>
                             <div class="bm-settings-row">
                                 <input type="password" id="bm-primary-token" placeholder="github_pat_..." style="width:100%; font-family:monospace; font-size:1.1em;">
@@ -1064,7 +1067,7 @@
             };
         },
 
-        // --- MANAGER UI (FIXED HEADER + FOOTER VERSION) ---
+        // --- MANAGER UI ---
         _createManagerUI: function() {
             if (managerUiCreated) return;
             const div = document.createElement('div');
@@ -1078,7 +1081,7 @@
                         <div class="bm-toolbar-right">
                             <div id="bm-stats-bar">Lade Statistiken...</div>
                             <div class="bm-actions">
-                                <span id="bm-manager-manual-btn" title="Anleitung (Sarkasmus included)">📖</span>
+                                <span id="bm-manager-manual-btn" title="Anleitung">📖</span>
                                 <span id="bm-token-btn" title="Repositories & Token">🔑</span>
                                 <span id="bm-refresh-btn" title="Reload">🔄</span>
                             </div>
@@ -1103,16 +1106,12 @@
             div.querySelector('.bm-close-btn').onclick = () => location.reload();
             document.getElementById('bm-refresh-btn').onclick = () => this.loadAndDisplayScripts(true);
             document.getElementById('bm-token-btn').onclick = () => this._createRepoManagerUI();
-
-            // Manager Manual Handler
             document.getElementById('bm-manager-manual-btn').onclick = () => this._showManualUI("B&M Manager", MANAGER_MANUAL_HTML);
-
             document.getElementById('save-scripts-button').addEventListener('click', () => this.applyChanges());
             document.getElementById('bm-script-filter').addEventListener('input', () => this._renderTabsAndContent());
             managerUiCreated = true;
         },
 
-        // Redirect
         _createTokenModalUI: function() { this._createRepoManagerUI(); }
     };
 
@@ -1140,7 +1139,6 @@
 
         #lss-script-manager-container, .bm-modal-overlay { font-family: var(--font-family); color: var(--text-main); font-size: 14px; }
 
-        /* RESTRUCTURED CONTAINER LAYOUT */
         #lss-script-manager-container {
             position: fixed; top: 8vh; left: 50%; transform: translateX(-50%); z-index: 10000;
             background-color: var(--bg-dark); border: 1px solid var(--border-color);
@@ -1151,150 +1149,56 @@
         }
         #lss-script-manager-container.visible { display: flex; }
 
-        /* Sticky Header */
-        .bm-manager-header {
-            flex-shrink: 0;
-            padding: 20px 20px 0 20px;
-            background-color: var(--bg-dark);
-            border-bottom: 1px solid var(--border-color);
-            z-index: 20;
-        }
+        .bm-manager-header { flex-shrink: 0; padding: 20px 20px 0 20px; background-color: var(--bg-dark); border-bottom: 1px solid var(--border-color); z-index: 20; }
+        .bm-manager-body { flex-grow: 1; overflow-y: auto; padding: 20px; background: rgba(0,0,0,0.1); }
+        .bm-manager-footer { flex-shrink: 0; padding: 15px 20px; background-color: var(--bg-dark); border-top: 1px solid var(--border-color); }
 
-        /* Scrollable Body */
-        .bm-manager-body {
-            flex-grow: 1;
-            overflow-y: auto;
-            padding: 20px;
-            background: rgba(0,0,0,0.1);
-        }
+        .bm-manager-body::-webkit-scrollbar { width: 8px; }
+        .bm-manager-body::-webkit-scrollbar-thumb { background-color: var(--border-color); border-radius: 4px; }
 
-        /* Sticky Footer */
-        .bm-manager-footer {
-            flex-shrink: 0;
-            padding: 15px 20px;
-            background-color: var(--bg-dark);
-            border-top: 1px solid var(--border-color);
-        }
-
-        /* SCROLLBAR STYLING */
-        .bm-manager-body::-webkit-scrollbar, .bm-modal-content::-webkit-scrollbar, .bm-settings-body::-webkit-scrollbar { width: 8px; }
-        .bm-manager-body::-webkit-scrollbar-track, .bm-modal-content::-webkit-scrollbar-track, .bm-settings-body::-webkit-scrollbar-track { background: var(--bg-dark); }
-        .bm-manager-body::-webkit-scrollbar-thumb, .bm-modal-content::-webkit-scrollbar-thumb, .bm-settings-body::-webkit-scrollbar-thumb { background-color: var(--border-color); border-radius: 4px; }
-
-        /* HEADER STYLES */
-        #lss-script-manager-container h3 {
-            text-align: center; border-bottom: 2px solid var(--primary-blue);
-            padding-bottom: 12px; margin: 0 0 20px 0; font-weight: 300; font-size: 1.8em; letter-spacing: 1px;
-        }
+        #lss-script-manager-container h3 { text-align: center; border-bottom: 2px solid var(--primary-blue); padding-bottom: 12px; margin: 0 0 20px 0; font-weight: 300; font-size: 1.8em; letter-spacing: 1px; }
 
         .bm-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; gap: 15px; }
-
-        #bm-script-filter, .bm-repo-add-form input, .bm-settings-row input, .bm-settings-row select, #bm-primary-token {
-            background-color: var(--input-bg-high-contrast);
-            color: var(--text-on-light);
-            border: 1px solid #999;
-            border-radius: 6px;
-            padding: 8px 12px;
-            font-size: 1em;
-            font-weight: 500;
-            transition: border-color 0.2s;
-        }
-        #bm-script-filter { width: 300px; }
-        #bm-script-filter:focus, input:focus { outline: none; border-color: var(--primary-blue); box-shadow: 0 0 0 2px rgba(13,110,253,0.3); }
+        #bm-script-filter { background-color: var(--input-bg-high-contrast); color: var(--text-on-light); border: 1px solid #999; border-radius: 6px; padding: 8px 12px; font-size: 1em; width: 300px; }
 
         .bm-toolbar-right { display: flex; align-items: center; gap: 20px; }
         .bm-actions { display: flex; gap: 15px; }
 
-        #bm-refresh-btn, #bm-token-btn, #bm-manager-manual-btn {
-            font-size: 1.4em; cursor: pointer; color: var(--text-muted);
-            transition: color 0.2s, transform 0.3s;
-        }
+        #bm-refresh-btn, #bm-token-btn, #bm-manager-manual-btn { font-size: 1.4em; cursor: pointer; color: var(--text-muted); transition: color 0.2s, transform 0.3s; }
         #bm-refresh-btn:hover, #bm-token-btn:hover, #bm-manager-manual-btn:hover { color: var(--text-main); transform: scale(1.15); }
 
-        #bm-stats-bar { font-size: 0.9em; color: var(--text-muted); white-space: nowrap; }
-
-        .bm-tabs {
-            display: flex; flex-wrap: nowrap; width: 100%; gap: 2px;
-            overflow: hidden;
-        }
-
-        .bm-tab {
-            flex: 1 1 0; min-width: 0; padding: 10px 5px;
-            background: #333; color: #aaa; cursor: pointer;
-            border-radius: 5px 5px 0 0; transition: flex-grow 0.2s ease, background-color 0.2s;
-            font-weight: 500; text-align: center;
-            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-            border: 1px solid #444; border-bottom: none;
-        }
-        .bm-tab:hover { flex-grow: 2; background: var(--bg-card); color: var(--text-main); z-index: 2; }
-
-        .bm-tab.active {
-            flex-grow: 3; background-color: var(--primary-blue) !important;
-            color: white !important; font-weight: bold; z-index: 1;
-            border-color: var(--primary-blue) !important; opacity: 1;
-        }
-        .bm-tab-update.active { background: var(--warning-color) !important; color: #333 !important; border-color: var(--warning-color) !important; }
+        .bm-tabs { display: flex; flex-wrap: nowrap; width: 100%; gap: 2px; overflow: hidden; }
+        .bm-tab { flex: 1; padding: 10px 5px; background: #333; color: #aaa; cursor: pointer; border-radius: 5px 5px 0 0; font-weight: 500; text-align: center; border: 1px solid #444; border-bottom: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .bm-tab.active { flex-grow: 3; background-color: var(--primary-blue) !important; color: white !important; font-weight: bold; }
+        .bm-tab-update.active { background: var(--warning-color) !important; color: #333 !important; }
 
         .bm-category-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; padding-bottom: 10px; }
 
-        .script-button {
-            padding: 15px; border-radius: 6px; cursor: pointer; position: relative;
-            background: var(--bg-panel); text-align: center; min-height: 80px;
-            display: flex; flex-direction: column; justify-content: center; align-items: center;
-            transition: transform 0.2s, box-shadow 0.2s; border: 1px solid transparent;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-        }
+        .script-button { padding: 15px; border-radius: 6px; cursor: pointer; position: relative; background: var(--bg-panel); text-align: center; min-height: 80px; display: flex; flex-direction: column; justify-content: center; align-items: center; transition: transform 0.2s, box-shadow 0.2s; border: 1px solid transparent; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
         .script-button:hover { transform: translateY(-3px); box-shadow: var(--shadow-soft); z-index: 10; }
-
-        .script-button.install { border-color: var(--btn-secondary); color: var(--text-muted); }
-        .script-button.install_pending { background: var(--pending-cyan); color: #000; border: none; }
-
         .script-button.active { background: var(--primary-blue); color: white; border: none; }
-        .script-button.active strong { color: white; }
-
         .script-button.inactive { background: #343a40; color: #aaa; border: 1px solid var(--border-color); opacity: 0.9; }
-        .script-button.update { background: linear-gradient(135deg, var(--warning-color), #e0a800); color: #222; animation: none; }
-        .script-button.uninstall_pending { background: var(--danger-color); color: white; border: none; opacity: 0.9; }
+        .script-button.update { background: linear-gradient(135deg, var(--warning-color), #e0a800); color: #222; }
 
-        .script-button strong { display: block; font-size: 1.05em; margin-bottom: 5px; line-height: 1.3; }
-        .version { font-size: 0.85em; opacity: 0.8; background: rgba(0,0,0,0.2); padding: 2px 6px; border-radius: 10px; }
+        .bm-config-btn, .bm-del-btn, .bm-manual-btn { position: absolute; font-size: 1.1em; opacity: 0.6; transition: opacity 0.2s; padding: 2px; }
+        .bm-del-btn { top: 2px; right: 5px; color: #fff; font-weight: bold; }
+        .bm-config-btn { bottom: 5px; right: 5px; }
+        .bm-manual-btn { bottom: 5px; left: 5px; }
 
-        .bm-config-btn { position: absolute; bottom: 5px; right: 5px; font-size: 1.1em; opacity: 0.6; transition: opacity 0.2s; padding: 2px; }
-        .bm-del-btn { position: absolute; top: 2px; right: 5px; font-size: 1.1em; opacity: 0.6; color: #fff; transition: opacity 0.2s; padding: 2px; font-weight: bold; }
-        .bm-del-btn:hover { color: var(--text-main); transform: scale(1.3); opacity: 1; }
-        .script-button:hover .bm-config-btn, .script-button:hover .bm-del-btn { opacity: 1; }
-
-        .bm-manual-btn { position: absolute; bottom: 5px; left: 5px; font-size: 1.1em; opacity: 0.6; transition: opacity 0.2s; padding: 2px; }
-        .script-button:hover .bm-manual-btn { opacity: 1; }
-        .bm-manual-btn:hover { transform: scale(1.2); cursor: pointer; }
-
-        #save-scripts-button { width: 100%; padding: 14px; font-weight: bold; color: white; background-color: var(--primary-blue); border: none; border-radius: 6px; cursor: pointer; font-size: 1.1em; transition: background 0.2s; }
+        #save-scripts-button { width: 100%; padding: 14px; font-weight: bold; color: white; background-color: var(--primary-blue); border: none; border-radius: 6px; cursor: pointer; font-size: 1.1em; }
         #save-scripts-button:hover { background-color: var(--primary-blue-hover); }
-        #save-scripts-button:disabled { background-color: var(--btn-secondary); cursor: not-allowed; }
 
-        .bm-close-btn { position: absolute; top: 15px; right: 20px; font-size: 24px; cursor: pointer; color: var(--text-muted); transition: color 0.2s; }
-        .bm-close-btn:hover { color: var(--text-main); }
+        .bm-close-btn { position: absolute; top: 15px; right: 20px; font-size: 24px; cursor: pointer; color: var(--text-muted); }
 
         .bm-modal-overlay { display: none; position: fixed; z-index: 10001; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.6); backdrop-filter: blur(4px); justify-content: center; align-items: center; }
-        .bm-settings-content { background-color: var(--bg-dark); color: var(--text-main); padding: 25px; border-radius: 10px; border: 1px solid var(--border-color); width: 90%; max-width: 600px; box-shadow: 0 10px 40px rgba(0,0,0,0.6); }
-        .bm-settings-header { font-size: 1.4em; margin-bottom: 20px; border-bottom: 1px solid var(--border-color); padding-bottom: 10px; font-weight: 300; }
-        .bm-settings-row { display: grid; grid-template-columns: 2fr 1fr; gap: 15px; align-items: center; margin-bottom: 15px; }
-
-        .bm-settings-footer { margin-top: 25px; text-align: right; border-top: 1px solid var(--border-color); padding-top: 15px; }
-        .bm-settings-footer button { padding: 10px 20px; border-radius: 5px; border: none; cursor: pointer; margin-left: 10px; font-weight: 500; color: white; }
-
-        #bm-manual-body img { max-width: 100%; height: auto; border-radius: 4px; }
-
-        .bm-repo-card { background: var(--bg-panel); padding: 15px; border-radius: 6px; margin-bottom: 10px; border-left: 4px solid var(--primary-blue); }
-        .bm-repo-title { font-weight: bold; font-size: 1.1em; color: var(--text-main); }
-        .bm-repo-item { display: flex; align-items: center; justify-content: space-between; background: var(--bg-card); padding: 10px; border-radius: 4px; margin-bottom: 8px; border: 1px solid var(--border-color); }
-        .bm-repo-add-form { display: flex; gap: 10px; margin-top: 20px; }
-
-        .bm-repo-del { background: var(--danger-color); border:none; padding: 5px 10px; border-radius: 4px; cursor: pointer; color:white; }
-
-        .bm-loader { display: inline-block; border: 3px solid rgba(255,255,255,0.1); border-top: 3px solid var(--primary-blue); border-radius: 50%; width: 20px; height: 20px; animation: bm-spin 0.8s linear infinite; margin-right: 10px; vertical-align: middle; }
-        @keyframes bm-spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-        #b-m-scriptmanager-link.bm-update-highlight { background-color: var(--primary-blue) !important; color: white !important; border-radius: 4px; padding: 2px 6px; }
+        .bm-settings-content { background-color: var(--bg-dark); color: var(--text-main); padding: 25px; border-radius: 10px; border: 1px solid var(--border-color); width: 90%; max-width: 600px; }
+        
+        /* FIX FÜR PROFILKOPF & LINK */
+        #menu_profile.bm-update-highlight, #b-m-scriptmanager-link.bm-update-highlight {
+            background-color: var(--primary-blue) !important;
+            color: #ffffff !important;
+            border-radius: 4px;
+        }
     `);
 
     // START
