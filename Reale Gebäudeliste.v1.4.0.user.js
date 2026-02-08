@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Reale Gebäudeliste (Multi-Window-Version)
 // @namespace    http://tampermonkey.net/
-// @version      1.4.0
-// @description  Zeigt eine Liste von realen Gebäuden in einem separaten Fenster an, interagiert mit dem Haupt-Tab und merkt sich Bau-Einstellungen.
+// @version      1.4.1
+// @description  Zeigt eine Liste von realen Gebäuden an, interagiert mit dem Haupt-Tab, merkt sich Bau-Einstellungen und filtert vorhandene Wachen.
 // @author       Whice + Masklin (Modifiziert von Gemini)
 // @match        https://*.leitstellenspiel.de/
 // @match        https://bosmap.de/liste.html
@@ -77,9 +77,8 @@
             menuProfileAddMenuButton.appendChild(menuProfileAddMenuButtonA);
             menuProfileUl.appendChild(menuProfileAddMenuButton);
 
-            // --- NEU: Listener zum SPEICHERN der Einstellungen beim Bauen ---
+            // Listener zum SPEICHERN der Einstellungen beim Bauen
             document.body.addEventListener('click', function(e) {
-                // Prüfen, ob der geklickte Button der "Bauen (Credits)" Button ist
                 if (e.target && e.target.id === 'build_credits_0') {
 
                     const typeSelect = document.querySelector('#building_building_type');
@@ -95,13 +94,11 @@
                     }
 
                     // 2. Startfahrzeug merken
-                    // Wir suchen nach irgendeinem Select, das "start_vehicle" im Namen hat
                     const vehicleSelect = document.querySelector('select[name^="building[start_vehicle"]');
                     if (vehicleSelect) {
                         settings.vehicle = vehicleSelect.value;
                     }
 
-                    // Speichern unter einem Schlüssel, der den Gebäudetyp enthält
                     GM_setValue('reale_liste_config_' + currentType, JSON.stringify(settings));
                     console.log(`${projectName}: Einstellungen für Typ ${currentType} gespeichert:`, settings);
                 }
@@ -118,19 +115,17 @@
                     map.setView([cmd.lat, cmd.lon], 17);
                 }
             } else if (cmd.action === 'place') {
-                // Button klicken
                 document.querySelector('#build_new_building')?.click();
 
-                // Karte zentrieren
                  if (typeof map !== 'undefined' && map.setView) {
                     map.invalidateSize();
                     map.setView([cmd.lat, cmd.lon], 17);
                 }
 
-                // --- NEU: 2-Phasen-Logik zum Ausfüllen ---
+                // 2-Phasen-Logik zum Ausfüllen
                 let attempts = 0;
-                const maxAttempts = 150; // ca. 15 Sekunden Timeout (großzügig für langsame Server)
-                let phase = 1; // Phase 1: Name & Typ setzen. Phase 2: LST & Fahrzeug setzen
+                const maxAttempts = 150;
+                let phase = 1;
 
                 const checkFormInterval = setInterval(() => {
                     attempts++;
@@ -149,14 +144,10 @@
                             nameInput.value = cmd.name;
                             typSelect.value = cmd.type;
 
-                            // Change-Event feuern, damit das Spiel die Fahrzeugliste lädt (AJAX)
                             const changeEvent = new Event('change', { 'bubbles': true, 'cancelable': true });
                             typSelect.dispatchEvent(changeEvent);
 
                             console.log(`${projectName}: Name und Typ gesetzt. Warte auf Fahrzeug-Liste...`);
-
-                            // Weiter zu Phase 2.
-                            // WICHTIG: Wir müssen dem Spiel Zeit geben, das Change-Event zu verarbeiten.
                             phase = 2;
                             return;
                         }
@@ -164,11 +155,8 @@
 
                     // --- PHASE 2: Erweiterte Daten (LST & Fahrzeug) ---
                     if (phase === 2) {
-                        // Lade gespeicherte Config für diesen Typ
-                        // JETZT FUNKTIONIERT DAS WEIL @grant GM_getValue OBEN DRIN STEHT
                         const savedConfigJson = GM_getValue('reale_liste_config_' + cmd.type);
 
-                        // Wenn keine Config da ist, sind wir fertig
                         if (!savedConfigJson) {
                             console.log(`${projectName}: Keine gespeicherte Config für Typ ${cmd.type} gefunden.`);
                             clearInterval(checkFormInterval);
@@ -184,16 +172,13 @@
                             return;
                         }
 
-                        // Wir suchen die Felder erneut (da das Spiel sie evtl. neu gerendert hat)
                         const lstSelect = document.querySelector('#building_leitstelle_building_id');
                         const vehicleSelect = document.querySelector('select[name^="building[start_vehicle"]');
 
-                        // Wir warten, bis das Fahrzeug-Dropdown sichtbar ist ODER (falls kein Fz existiert) nur LST da ist.
                         let readyToSet = true;
 
-                        // Wenn wir ein Fahrzeug gespeichert haben, muss das Dropdown da sein, bevor wir schreiben
                         if (config.vehicle && !vehicleSelect) {
-                            readyToSet = false; // Noch warten, Server lädt noch
+                            readyToSet = false;
                         }
 
                         if (readyToSet) {
@@ -208,11 +193,10 @@
                             clearInterval(checkFormInterval);
                         }
                     }
-                }, 100); // Alle 100ms prüfen
+                }, 100);
             }
         }
 
-        // Startlogik für Tab A
         GM_addValueChangeListener(commandChannel, (name, old_value, new_value, remote) => {
             if (remote && new_value) {
                 handleListCommand(JSON.parse(new_value));
@@ -241,9 +225,10 @@
 
         // Globale Filter-Variablen
         let bundeslandFilter = 'all';
-        let regionFilter = 'all'; // Kreis
-        let stadtFilter = 'all'; // Ort
+        let regionFilter = 'all';
+        let stadtFilter = 'all';
         let wachenFilter = -1;
+        let hideExisting = false; // Neuer Status-Filter
 
         function createBuildingMenu() {
             console.log(`${projectName}: createBuildingMenu() wird ausgeführt...`);
@@ -273,11 +258,15 @@
                 margin-top: 0; padding: 0 10px; line-height: 1;
             }
             .close-btn:hover { color: #fff; }
+
+            /* Angepasstes Layout für Suchfeld und Button */
             .filter-section {
-                display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 15px;
+                display: flex; flex-wrap: wrap; gap: 10px; padding: 10px 15px;
                 background: #3c3c3c;
                 border-bottom: 1px solid #444;
+                align-items: center;
             }
+
             .filter-btn {
                 padding: 5px 10px; background: #555;
                 color: #e0e0e0;
@@ -285,6 +274,7 @@
                 border-radius: 4px; cursor: pointer; transition: all 0.2s;
             }
             .filter-btn.active { background: #0d6efd; color: white; border-color: #0d6efd; }
+
             .wachen-list { flex: 1; overflow-y: auto; padding: 0; background: #2b2b2b; }
             .building-menu-page-content > .wache-entry:nth-child(even) { background-color: #333; }
             .wache-entry {
@@ -313,7 +303,7 @@
                 background-color: #444;
                 color: #e0e0e0;
             }
-            #search-input-field { width: 100%; box-sizing: border-box; }
+            #search-input-field { flex: 1; box-sizing: border-box; } /* Flex 1 damit es den Platz nimmt */
             #search-input-field::placeholder { color: #999; }
 
             .loading-text { padding: 20px; text-align: center; font-size: 1.2em; color: #aaa; }
@@ -333,6 +323,7 @@
 
                 <div class="filter-section" id="search-filters">
                      <input type="text" id="search-input-field" placeholder="Suche nach Name...">
+                     <button id="toggle-existing-btn" class="filter-btn">Nur Fehlende</button>
                 </div>
 
                 <div class="filter-section" id="geo-filters">
@@ -386,6 +377,12 @@
             if (wachenFilter !== -1) {
                 filteredList = filteredList.filter(w => w.building_type === wachenFilter);
             }
+
+            // --- NEUE FILTER-LOGIK ---
+            if (hideExisting) {
+                filteredList = filteredList.filter(w => !getPlayerWacheFromRealWache(w));
+            }
+            // -------------------------
 
             if (filteredList.length === 0) {
                  pageContent.innerHTML = `<div class="loading-text">${dataLoaded ? 'Keine passenden Wachen gefunden.' : 'Lade Wachenliste...'}</div>`;
@@ -649,6 +646,14 @@
                 if (event.target.matches('.filter-btn')) {
                     const group = event.target.getAttribute('data-filter-group');
                     const groupValue = event.target.getAttribute('data-filter-value');
+
+                    // Behandlung für den neuen "Vorhandene ausblenden" Button
+                    if (event.target.id === 'toggle-existing-btn') {
+                         hideExisting = !hideExisting;
+                         event.target.classList.toggle('active');
+                         updateBuildingMenuListList();
+                         return;
+                    }
 
                     document.querySelectorAll(`[data-filter-group="${group}"]`).forEach(b => b.classList.remove('active'));
                     event.target.classList.add('active');
