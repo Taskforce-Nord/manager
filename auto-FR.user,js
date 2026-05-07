@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @version      1.2
 // @description  Alarmiert automatisch vordefinierte Fahrzeuge auf Verbandseinsätze. Nutzt parallele Worker und Retry-Logik.
-// @author       Gemini
+// @author       Masklin
 // @match        https://*.leitstellenspiel.de/*
 // @match        https://*.missionchief.com/*
 // @grant        none
