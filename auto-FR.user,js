@@ -1,0 +1,337 @@
+// ==UserScript==
+// @name         LSS Verbands-FR Bot (JS Port - Multi-Worker)
+// @namespace    http://tampermonkey.net/
+// @version      1.2
+// @description  Alarmiert automatisch vordefinierte Fahrzeuge auf Verbandseinsätze. Nutzt parallele Worker und Retry-Logik.
+// @author       Gemini
+// @match        https://*.leitstellenspiel.de/*
+// @match        https://*.missionchief.com/*
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // --- KONFIGURATION ---
+    // IDs der Fahrzeuge, die alarmiert werden sollen (z.B. LF, FuStw, GruKw)
+    const FR_VEHICLE_TYPES = [30, 32, 154, 152, 159, 160, 95, 98];
+    const DELAY_BETWEEN_ALARMS = 800; // Millisekunden Pause nach einem erfolgreichen Alarm eines Workers
+
+    // Worker & Retry Einstellungen
+    const WORKER_COUNT = 5;       // Anzahl gleichzeitiger Alarmierungs-Threads
+    const MAX_RETRIES = 3;        // Wie oft bei HTTP 429/409 neu versucht werden soll
+    const RETRY_DELAY_MS = 1500;  // Basis-Wartezeit vor einem Retry (wird pro Versuch multipliziert)
+
+    // --- DATENBANK HELPER ---
+    const DB_NAME = 'LSS_API_Data';
+    const DB_VERSION = 1;
+    const STORE_NAME = 'api_cache';
+
+    async function openDB() {
+        return new Promise((resolve, reject) => {
+            const request = indexedDB.open(DB_NAME, DB_VERSION);
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async function loadData(key) {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE_NAME, 'readonly');
+            const request = tx.objectStore(STORE_NAME).get(key);
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(tx.error);
+        });
+    }
+
+    // --- HILFSFUNKTIONEN ---
+    function calculateDistance(lat1, lon1, lat2, lon2) {
+        if (!lat1 || !lon1 || !lat2 || !lon2) return Infinity;
+        const R = 6371; // Erdradius in km
+        const dLat = (lat2 - lat1) * Math.PI / 180;
+        const dLon = (lon2 - lon1) * Math.PI / 180;
+        const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                  Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                  Math.sin(dLon/2) * Math.sin(dLon/2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+        return R * c;
+    }
+
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+    // --- UI INJECTION ---
+    function injectMenuAndModal() {
+        const profileMenu = document.querySelector('ul.dropdown-menu[aria-labelledby="menu_profile"]');
+        if (!profileMenu) return;
+
+        const li = document.createElement('li');
+        li.innerHTML = `<a href="#" id="vfr-open-modal-btn"><span class="glyphicon glyphicon-fire" style="color: #ff8c00; margin-right: 8px;"></span> Verbands-FR Starter</a>`;
+        profileMenu.insertBefore(li, profileMenu.firstChild);
+
+        const modalHtml = `
+        <div class="modal fade" id="vfr-modal" tabindex="-1" role="dialog">
+            <div class="modal-dialog" role="document">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <button type="button" class="close" data-dismiss="modal" aria-label="Close"><span aria-hidden="true">&times;</span></button>
+                        <h4 class="modal-title">Verbands-FR Automatik (Multi-Worker)</h4>
+                    </div>
+                    <div class="modal-body">
+                        <p id="vfr-status" style="font-weight: bold; color: #337ab7;">Bereit. Lade Daten aus dem Cache...</p>
+                        <div class="progress">
+                            <div id="vfr-progress-bar" class="progress-bar progress-bar-striped" role="progressbar" style="width: 0%; min-width: 2em;">0%</div>
+                        </div>
+                        <div id="vfr-log" style="height: 250px; overflow-y: scroll; background: #1e1e1e; color: #00ff00; font-family: monospace; padding: 10px; font-size: 12px; border-radius: 4px;"></div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-default" data-dismiss="modal">Schließen</button>
+                        <button type="button" class="btn btn-success" id="vfr-start-btn" disabled>Starte Alarmierung</button>
+                    </div>
+                </div>
+            </div>
+        </div>`;
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+        document.getElementById('vfr-open-modal-btn').addEventListener('click', (e) => {
+            e.preventDefault();
+            $('#vfr-modal').modal('show');
+            prepareData();
+        });
+
+        document.getElementById('vfr-start-btn').addEventListener('click', startAlarming);
+    }
+
+    function log(msg, type='info') {
+        const logBox = document.getElementById('vfr-log');
+        let color = '#ccc';
+        if (type === 'error') color = '#ff4d4d';
+        if (type === 'success') color = '#00cc44';
+        if (type === 'warning') color = '#ffcc00';
+
+        logBox.innerHTML += `<div style="color: ${color}">[${new Date().toLocaleTimeString()}] ${msg}</div>`;
+        logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    // --- HAUPTLOGIK ---
+    let globalMissions = [];
+    let globalVehicles = [];
+    let globalBuildings = {};
+
+    async function prepareData() {
+        log("Lade Fahrzeuge und Gebäude aus dem IndexedDB-Cache...", "info");
+        document.getElementById('vfr-start-btn').disabled = true;
+        document.getElementById('vfr-progress-bar').style.width = '0%';
+        document.getElementById('vfr-progress-bar').innerText = '0%';
+
+        try {
+            const rawVehicles = await loadData('vehicles');
+            const rawBuildings = await loadData('buildings');
+
+            if (!rawVehicles || !rawBuildings) {
+                log("FEHLER: Cache leer! Bitte lass den API-Fetcher zuerst laufen.", "error");
+                return;
+            }
+
+            const vehicles = JSON.parse(rawVehicles);
+            const buildings = JSON.parse(rawBuildings);
+
+            globalBuildings = {};
+            buildings.forEach(b => globalBuildings[b.id] = { lat: b.latitude, lon: b.longitude });
+
+            globalVehicles = vehicles.filter(v =>
+                FR_VEHICLE_TYPES.includes(v.vehicle_type) &&
+                (v.fms_real === 1 || v.fms_real === 2)
+            ).map(v => {
+                const coords = globalBuildings[v.building_id] || { lat: 0, lon: 0 };
+                return { id: v.id, lat: coords.lat, lon: coords.lon };
+            });
+
+            log(`Erfolgreich geladen: ${globalVehicles.length} freie FR-Fahrzeuge.`);
+            fetchMissions();
+
+        } catch (e) {
+            log(`DB Fehler: ${e.message}`, "error");
+        }
+    }
+
+    async function fetchMissions() {
+        log("Suche offene Verbandseinsätze...", "info");
+        try {
+            const res = await fetch('/map/mission_markers_alliance.js.erb');
+            const text = await res.text();
+
+            // FIX 1: [\s\S]*? statt .*? nutzen, damit der Regex Zeilenumbrüche ignoriert (entspricht re.DOTALL in Python)
+            const involvedMatch = text.match(/missionsInvolvedArr\(\[([\s\S]*?)\]\)/);
+            const partMatch = text.match(/addMissionParticipations\(\[([\s\S]*?)\]\)/);
+
+            let involvedIds = new Set(involvedMatch && involvedMatch[1].trim() ? involvedMatch[1].replace(/[^0-9,]/g, '').split(',').filter(Boolean).map(Number) : []);
+            let partIds = new Set(partMatch && partMatch[1].trim() ? partMatch[1].replace(/[^0-9,]/g, '').split(',').filter(Boolean).map(Number) : []);
+
+            let targetIds = new Set([...involvedIds].filter(x => !partIds.has(x)));
+            let useInvolvedFilter = involvedIds.size > 0; // Fallback, falls missionsInvolvedArr leer geliefert wird
+
+            // FIX 2: Robustes mList Parsing (Exakter Nachbau deiner _parse_mlist Funktion in Python)
+            let allMissions = [];
+            const startStr = "const mList = ";
+            const startIndex = text.indexOf(startStr);
+
+            if (startIndex !== -1) {
+                let jsonStart = startIndex + startStr.length;
+                if (text[jsonStart] === '[') {
+                    let openBrackets = 1;
+                    let searchPos = jsonStart + 1;
+                    while (openBrackets > 0 && searchPos < text.length) {
+                        if (text[searchPos] === '[') openBrackets++;
+                        else if (text[searchPos] === ']') openBrackets--;
+                        searchPos++;
+                    }
+                    if (openBrackets === 0) {
+                        let jsonStr = text.substring(jsonStart, searchPos);
+                        jsonStr = jsonStr.replace(/,\s*\]$/, ']'); // Letztes Komma entfernen, falls vorhanden
+                        try {
+                            allMissions = JSON.parse(jsonStr);
+                        } catch (e) {
+                            log(`JSON Parse Warnung, nutze Regex-Fallback: ${e.message}`, "warning");
+                        }
+                    }
+                }
+            }
+
+            // Fallback: Falls das JSON Parsing komplett scheitert, per multiline Regex auslesen
+            if (allMissions.length === 0) {
+                const mListRegex = /"id":(\d+)[\s\S]{0,150}?"latitude":([\d.-]+)[\s\S]{0,150}?"longitude":([\d.-]+)/g;
+                let match;
+                while ((match = mListRegex.exec(text)) !== null) {
+                    allMissions.push({
+                        id: parseInt(match[1]),
+                        latitude: parseFloat(match[2]),
+                        longitude: parseFloat(match[3])
+                    });
+                }
+            }
+
+            // Filtern: Nur Einsätze behalten, die uns interessieren
+            globalMissions = allMissions.filter(m => {
+                if (partIds.has(m.id)) return false; // Wir haben schon ein Fzg da -> ignorieren
+                if (useInvolvedFilter && !targetIds.has(m.id)) return false; // Einsatz ist nicht im Beteiligungs-Array -> ignorieren
+                return true;
+            }).map(m => ({
+                id: m.id,
+                lat: m.latitude,
+                lon: m.longitude
+            }));
+
+            log(`${globalMissions.length} neue Verbandseinsätze (ohne eigene Beteiligung) gefunden.`, "success");
+            if (globalMissions.length > 0 && globalVehicles.length > 0) {
+                document.getElementById('vfr-start-btn').disabled = false;
+                document.getElementById('vfr-status').innerText = `Bereit für ${globalMissions.length} Einsätze.`;
+            } else {
+                document.getElementById('vfr-status').innerText = "Aktuell nichts zu tun (Keine passenden Einsätze oder keine freien Fahrzeuge).";
+            }
+
+        } catch (e) {
+            log(`Fehler beim Einsatz-Fetch: ${e.message}`, "error");
+        }
+    }
+
+    async function startAlarming() {
+        document.getElementById('vfr-start-btn').disabled = true;
+        const csrfToken = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
+        const progressBar = document.getElementById('vfr-progress-bar');
+
+        let completed = 0;
+        const total = globalMissions.length;
+
+        // Schlange für die Worker
+        const queue = [...globalMissions];
+
+        async function worker(workerId) {
+            while (queue.length > 0) {
+                const mission = queue.shift();
+
+                let bestVehicle = null;
+                let bestDist = Infinity;
+                let bestIndex = -1;
+
+                for (let i = 0; i < globalVehicles.length; i++) {
+                    const v = globalVehicles[i];
+                    const dist = calculateDistance(mission.lat, mission.lon, v.lat, v.lon);
+                    if (dist < bestDist) {
+                        bestDist = dist;
+                        bestVehicle = v;
+                        bestIndex = i;
+                    }
+                }
+
+                if (!bestVehicle) {
+                    log(`[W-${workerId}] Keine Fahrzeuge mehr für Einsatz ${mission.id} verfügbar.`, "error");
+                    break;
+                }
+
+                globalVehicles.splice(bestIndex, 1);
+
+                const formData = new URLSearchParams();
+                formData.append('authenticity_token', csrfToken);
+                formData.append('vehicle_ids[]', bestVehicle.id);
+
+                let attempts = 0;
+                let success = false;
+
+                while (attempts < MAX_RETRIES && !success) {
+                    try {
+                        const response = await fetch(`/missions/${mission.id}/alarm`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                                'X-Requested-With': 'XMLHttpRequest'
+                            },
+                            body: formData
+                        });
+
+                        if (response.ok) {
+                            log(`[W-${workerId}] Einsatz ${mission.id} alarmiert (FR ${bestVehicle.id}, Dist: ${bestDist.toFixed(2)}km)`, "success");
+                            success = true;
+                        } else if (response.status === 429 || response.status === 409) {
+                            attempts++;
+                            log(`[W-${workerId}] Server meldet ${response.status} bei Einsatz ${mission.id}. Versuch ${attempts}/${MAX_RETRIES}...`, "warning");
+                            await sleep(RETRY_DELAY_MS * attempts);
+                        } else {
+                            log(`[W-${workerId}] Abbruch für ${mission.id}: Unerwarteter Server-Fehler (${response.status})`, "error");
+                            break;
+                        }
+                    } catch (e) {
+                        attempts++;
+                        log(`[W-${workerId}] Netzwerkfehler bei ${mission.id}: ${e.message}. Versuch ${attempts}...`, "warning");
+                        await sleep(RETRY_DELAY_MS);
+                    }
+                }
+
+                if (!success) {
+                    log(`[W-${workerId}] Alarmierung für ${mission.id} final fehlgeschlagen.`, "error");
+                }
+
+                completed++;
+                const percent = Math.round((completed / total) * 100);
+                progressBar.style.width = percent + '%';
+                progressBar.innerText = percent + '%';
+
+                await sleep(DELAY_BETWEEN_ALARMS);
+            }
+        }
+
+        log(`Starte ${WORKER_COUNT} parallele Worker...`, "info");
+        const workers = [];
+        for (let i = 1; i <= WORKER_COUNT; i++) {
+            workers.push(worker(i));
+        }
+
+        await Promise.all(workers);
+
+        log("Alle Worker haben ihre Arbeit beendet.", "info");
+        document.getElementById('vfr-status').innerText = "Durchlauf abgeschlossen.";
+    }
+
+    setTimeout(injectMenuAndModal, 1500);
+
+})();
