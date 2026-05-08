@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         B&M Scriptmanager (V27.3.2 - Manual Integrated + Footer Version)
+// @name         B&M Scriptmanager (V27.4.0 - Manual Integrated + SOS Feature)
 // @namespace    https://github.com/taskforce-Nord/public
-// @version      27.3.2
-// @description  Erkennt gelöschte Server-Skripte ("Zombies"), erlaubt deren Deinstallation und zeigt HTML-Anleitungen an. Jetzt mit integriertem Handbuch und Version in der Fußzeile.
+// @version      27.4.0
+// @description  Erkennt gelöschte Server-Skripte, erlaubt deren Deinstallation und zeigt HTML-Anleitungen an. Jetzt mit SOS-Support-Funktion.
 // @author       B&M
 // @match        https://www.leitstellenspiel.de/*
 // @grant        GM_xmlhttpRequest
@@ -19,7 +19,7 @@
     'use strict';
 
     // --- KONFIGURATION ---
-    const SCRIPT_VERSION = "27.3.2"; // Version für Anzeige
+    const SCRIPT_VERSION = "27.4.0"; // Version für Anzeige
 
     const PRIMARY_REPO = {
         owner: 'Taskforce-Nord',
@@ -34,147 +34,62 @@
     const GM_TOKEN_KEY = "bm_access_pat";
     const GM_CUSTOM_REPOS_KEY = "bm_custom_repos";
     const LS_ACCESS_KEY = "bm_access_cfg";
+    const GM_TELEMETRY_KEY = "bm_telemetry_optin";
 
     // --- INTEGRIERTES HANDBUCH (SARCASTIC EDITION) ---
     const MANAGER_MANUAL_HTML = `
     <style>
-        .bm-manual-scope {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            color: #eeeeee;
-            line-height: 1.6;
-            padding: 10px;
-        }
-        .bm-manual-scope .container {
-            max-width: 100%;
-            margin: 0 auto;
-            background-color: #2c313a;
-            padding: 30px;
-            border-radius: 10px;
-            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
-            border: 1px solid #444c5e;
-            box-sizing: border-box;
-        }
-        .bm-manual-scope h1 {
-            color: #0d6efd;
-            border-bottom: 2px solid #0d6efd;
-            padding-bottom: 10px;
-            text-align: center;
-            margin-top: 0;
-        }
+        .bm-manual-scope { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #eeeeee; line-height: 1.6; padding: 10px; }
+        .bm-manual-scope .container { max-width: 100%; margin: 0 auto; background-color: #2c313a; padding: 30px; border-radius: 10px; box-shadow: 0 5px 15px rgba(0,0,0,0.3); border: 1px solid #444c5e; box-sizing: border-box; }
+        .bm-manual-scope h1 { color: #0d6efd; border-bottom: 2px solid #0d6efd; padding-bottom: 10px; text-align: center; margin-top: 0; }
         .bm-manual-scope h2 { color: #17a2b8; margin-top: 30px; border-bottom: 1px solid #444; padding-bottom: 5px; }
         .bm-manual-scope h3 { color: #fff; margin-top: 20px; }
-        .bm-manual-scope .note {
-            background-color: #323a45;
-            border-left: 4px solid #f0ad4e;
-            padding: 15px;
-            margin: 20px 0;
-            font-style: italic;
-            color: #aaa;
-        }
-        .bm-manual-scope .step {
-            background-color: #222;
-            padding: 15px;
-            border-radius: 5px;
-            margin-bottom: 15px;
-            border: 1px solid #444;
-        }
+        .bm-manual-scope .note { background-color: #323a45; border-left: 4px solid #f0ad4e; padding: 15px; margin: 20px 0; font-style: italic; color: #aaa; }
+        .bm-manual-scope .step { background-color: #222; padding: 15px; border-radius: 5px; margin-bottom: 15px; border: 1px solid #444; }
         .bm-manual-scope .step strong { color: #fff; display: block; margin-bottom: 5px; }
-        .bm-manual-scope code {
-            background-color: #000;
-            color: #0d6efd;
-            padding: 2px 5px;
-            border-radius: 3px;
-            font-family: monospace;
-        }
-        .bm-manual-scope .btn-mock {
-            display: inline-block; padding: 5px 10px; border-radius: 4px;
-            font-weight: bold; font-size: 0.9em; margin: 2px;
-        }
+        .bm-manual-scope code { background-color: #000; color: #0d6efd; padding: 2px 5px; border-radius: 3px; font-family: monospace; }
+        .bm-manual-scope .btn-mock { display: inline-block; padding: 5px 10px; border-radius: 4px; font-weight: bold; font-size: 0.9em; margin: 2px; }
         .bm-manual-scope .blue { background-color: #0d6efd; color: white; }
         .bm-manual-scope .grey { background-color: #5a6268; color: white; }
         .bm-manual-scope .green { background-color: #28a745; color: white; }
         .bm-manual-scope .orange { background: linear-gradient(135deg, #f0ad4e, #e0a800); color: #222; }
         .bm-manual-scope a { color: #0d6efd; text-decoration: none; }
         .bm-manual-scope a:hover { text-decoration: underline; }
-        .bm-manual-scope .sarcasm-warning {
-            font-size: 0.8em; text-align: center; color: #666; margin-top: 50px; border-top: 1px dashed #444; padding-top: 10px;
-        }
+        .bm-manual-scope .sarcasm-warning { font-size: 0.8em; text-align: center; color: #666; margin-top: 50px; border-top: 1px dashed #444; padding-top: 10px; }
     </style>
-
     <div class="bm-manual-scope">
         <div class="container">
             <h1>B&M Scriptmanager</h1>
             <p style="text-align: center;"><em>Das Handbuch für Auserwählte (und solche, die es werden wollen).</em></p>
-
-            <div class="note">
-                <strong>Vorab-Info:</strong> Wir gehen davon aus, dass du weißt, wie man einen Computer einschaltet. Wenn du bei "Tampermonkey" an exotische Zoo-Tiere denkst, bist du hier falsch.
-            </div>
-
+            <div class="note"><strong>Vorab-Info:</strong> Wir gehen davon aus, dass du weißt, wie man einen Computer einschaltet. Wenn du bei "Tampermonkey" an exotische Zoo-Tiere denkst, bist du hier falsch.</div>
             <h2>1. Die Installation: Glückwunsch!</h2>
-            <div class="step">
-                Da du diesen Text gerade <strong>im</strong> Manager liest, hast du die Installation offensichtlich schon geschafft.
-                <br><br>
-                Wir sind stolz auf dich. Ein dressierter Schimpanse hätte es zwar auch hinbekommen, aber wir wollen deine Leistung nicht schmälern. Atme durch, der schwierigste Teil ist vorbei.
-            </div>
-
+            <div class="step">Da du diesen Text gerade <strong>im</strong> Manager liest, hast du die Installation offensichtlich schon geschafft.<br><br>Wir sind stolz auf dich. Ein dressierter Schimpanse hätte es zwar auch hinbekommen, aber wir wollen deine Leistung nicht schmälern. Atme durch, der schwierigste Teil ist vorbei.</div>
             <h2>2. Der VIP-Ausweis (Der Token)</h2>
             <p>Jetzt wird es ernst. Da unsere Skripte so gut sind, dass andere sie gerne als ihre eigenen ausgeben würden, haben wir eine Türsteher-Funktion eingebaut. Wir nennen das "Geistiges Eigentum schützen", du nennst es "Warum muss ich so ein langes Passwort eingeben?".</p>
-
-            <div class="step">
-                <strong>Schritt A: Setup-Bildschirm</strong>
-                Wenn du beim Start einen roten Warnhinweis gesehen hast, hast du ihn hoffentlich angeklickt. Wenn alles läuft: Ignoriere diesen Punkt.
-            </div>
-
-            <div class="step">
-                <strong>Schritt B: Der Schlüssel (GitHub PAT)</strong>
-                Du benötigst deinen persönlichen Zugangsschlüssel (Token).
-                <ul>
-                    <li>Hast du einen bekommen? <strong>Gut.</strong></li>
-                    <li>Hast du keinen? <strong>Pech.</strong> Frag höflich bei der Leitung nach. Betteln kann helfen.</li>
-                </ul>
-                Wenn die Lämpchen im Manager leuchten, hast du das bereits erledigt.
-            </div>
-
+            <div class="step"><strong>Schritt A: Setup-Bildschirm</strong> Wenn du beim Start einen roten Warnhinweis gesehen hast, hast du ihn hoffentlich angeklickt. Wenn alles läuft: Ignoriere diesen Punkt.</div>
+            <div class="step"><strong>Schritt B: Der Schlüssel (GitHub PAT)</strong> Du benötigst deinen persönlichen Zugangsschlüssel (Token).<ul><li>Hast du einen bekommen? <strong>Gut.</strong></li><li>Hast du keinen? <strong>Pech.</strong> Frag höflich bei der Leitung nach. Betteln kann helfen.</li></ul>Wenn die Lämpchen im Manager leuchten, hast du das bereits erledigt.</div>
             <h2>3. Die Bedienung: Malen nach Zahlen</h2>
-
             <h3>Die Farbenlehre</h3>
             <p>Wir haben das Interface so gestaltet, dass du es auch ohne Design-Studium verstehst. Es gibt bunte Kästchen:</p>
-
             <ul>
                 <li><span class="btn-mock grey">Grau (Dunkel)</span>: Das Skript schläft. Es ist installiert, aber aus. Es tut nichts.</li>
                 <li><span class="btn-mock blue">Blau (Leuchtend)</span>: Das Skript ist <strong>AKTIV</strong>. Es arbeitet für dich. Sei dankbar.</li>
                 <li><span class="btn-mock green">Grün (Installieren)</span>: Du hast es noch nicht, aber du könntest es haben.</li>
                 <li><span class="btn-mock orange">Gelb/Orange</span>: Ein Update! Wir waren fleißig. <strong>Fass das Kästchen nicht an!</strong> Das Update ist schon vorgemerkt. Du musst nur unten auf den Speicher-Knopf hämmern.</li>
             </ul>
-
             <h3>Ein- und Ausschalten</h3>
             <p>Klick auf ein Kästchen (außer bei Updates, siehe oben). Die Farbe ändert sich. Magie.</p>
             <p><strong>WICHTIG:</strong> Das Klicken ändert erst einmal nur die Farbe im Manager. Damit das Spiel das auch kapiert, musst du ganz unten auf den riesigen, kaum zu übersehenden Balken klicken:</p>
             <p style="text-align: center;"><span class="btn-mock blue" style="padding: 15px; font-size: 1.2em;">Änderungen anwenden</span></p>
             <p>Wer diesen Knopf nicht drückt und sich beschwert, dass nichts passiert, muss einen Kuchen ausgeben.</p>
-
             <h2>4. Profi-Funktionen (Vorsicht!)</h2>
-
-            <div class="step">
-                <strong>Das Zahnrad (⚙️)</strong>
-                Manche Skripte haben Einstellungen. Wenn du auf das kleine Zahnrad im Skript-Kästchen klickst, kannst du Dinge verstellen. Wenn du danach nicht mehr weißt, was du getan hast: Wir wissen es auch nicht.
-            </div>
-
-            <div class="step">
-                <strong>Zombies & Das Archiv</strong>
-                Manchmal löschen wir Skripte vom Server, weil sie alt sind oder schlecht riechen. Dein Manager erkennt diese "Zombies" (Leichen im Keller). Du findest diese im Tab "Archiv / Entfernt". Bitte drück dort das kleine <strong>X</strong>, um sie zu beerdigen. Lass los. Es ist vorbei.
-            </div>
-
+            <div class="step"><strong>Das Zahnrad (⚙️)</strong> Manche Skripte haben Einstellungen. Wenn du auf das kleine Zahnrad im Skript-Kästchen klickst, kannst du Dinge verstellen. Wenn du danach nicht mehr weißt, was du getan hast: Wir wissen es auch nicht.</div>
+            <div class="step"><strong>Das Support-Ticket (🚑)</strong> Oben rechts findest du den Erste-Hilfe-Knopf. Wenn gar nichts mehr geht, klick da drauf. Das sendet uns deine Einstellungen, damit wir sehen können, was du kaputt gemacht hast. Ohne Ticket-Nummer kein Support!</div>
+            <div class="step"><strong>Zombies & Das Archiv</strong> Manchmal löschen wir Skripte vom Server, weil sie alt sind oder schlecht riechen. Dein Manager erkennt diese "Zombies" (Leichen im Keller). Du findest diese im Tab "Archiv / Entfernt". Bitte drück dort das kleine <strong>X</strong>, um sie zu beerdigen. Lass los. Es ist vorbei.</div>
             <h2>5. Fehlerbehebung</h2>
-            <p><strong>"Es geht nicht!"</strong><br>
-            Hast du einen Token? Ist er gültig? Hast du gespeichert? Hast du die Seite neu geladen? Hast du den Computer an?</p>
-
-            <p><strong>"Ich sehe nur Rot!"</strong><br>
-            Dann ist dein Token falsch oder abgelaufen. Zurück zu Schritt 2. Geh nicht über Los.</p>
-
-            <div class="sarcasm-warning">
-                Disclaimer: Dieses Handbuch wurde mit viel Liebe und wenig Geduld erstellt. Bei Risiken und Nebenwirkungen friss die Packungsbeilage oder frag deinen B&M Administrator.
-            </div>
+            <p><strong>"Es geht nicht!"</strong><br>Hast du einen Token? Ist er gültig? Hast du gespeichert? Hast du die Seite neu geladen? Hast du den Computer an?</p>
+            <p><strong>"Ich sehe nur Rot!"</strong><br>Dann ist dein Token falsch oder abgelaufen. Zurück zu Schritt 2. Geh nicht über Los.</p>
+            <div class="sarcasm-warning">Disclaimer: Dieses Handbuch wurde mit viel Liebe und wenig Geduld erstellt. Bei Risiken und Nebenwirkungen friss die Packungsbeilage oder frag deinen B&M Administrator.</div>
         </div>
     </div>`;
 
@@ -372,8 +287,7 @@
                 if (updateFound) {
                     const link = document.getElementById('b-m-scriptmanager-link');
                     if (link) link.classList.add('bm-update-highlight');
-                    
-                    // --- NEU: MARKIERUNG DES PROFILKOPFS ---
+
                     const profileHead = document.getElementById('menu_profile');
                     if (profileHead) profileHead.classList.add('bm-update-highlight');
                 }
@@ -470,20 +384,16 @@
             }
 
             try {
-                // 1. Primary
                 const primaryToken = GM_getValue(GM_TOKEN_KEY, "");
                 const primaryInfo = { owner: PRIMARY_REPO.owner, name: PRIMARY_REPO.name, token: primaryToken, label: 'Stable' };
                 const p1 = this.fetchScriptsWithManifest(primaryInfo);
 
-                // 2. Custom
                 const customRepos = JSON.parse(GM_getValue(GM_CUSTOM_REPOS_KEY, "[]"));
                 const pCustom = customRepos.map(cr => this.fetchScriptsWithManifest({ owner: cr.owner, name: cr.name, token: cr.token, label: cr.name }));
 
-                // 3. Merge
                 const results = await Promise.all([p1, ...pCustom]);
                 const allOnline = results.flat();
 
-                // 4. Deduplicate (Highest Version wins)
                 const mergedMap = new Map();
                 allOnline.forEach(script => {
                     if (!mergedMap.has(script.name)) {
@@ -496,7 +406,6 @@
                     }
                 });
                 const finalOnline = [...mergedMap.values()];
-
                 const localScripts = await this.getScriptsFromDB();
 
                 cachedScriptData = { online: finalOnline, local: localScripts };
@@ -512,7 +421,6 @@
 
         _renderTabsAndContent: function() {
             const { online, local } = cachedScriptData;
-
             const tabsContainer = document.getElementById('bm-tabs-area');
             const gridContainer = document.getElementById('bm-grid-area');
 
@@ -526,7 +434,6 @@
             const pToken = GM_getValue(GM_TOKEN_KEY, "");
             const customRepos = JSON.parse(GM_getValue(GM_CUSTOM_REPOS_KEY, "[]"));
 
-            // 1. Process Online Scripts
             online.forEach(meta => {
                 scriptMetadataCache[meta.name] = meta;
                 const loc = local.find(s => s.name === meta.name);
@@ -546,7 +453,6 @@
                     if (loc.hasSettings) meta.hasSettings = true;
                 }
 
-                // Self-Healing Auth
                 let hasValidToken = false;
                 if(meta.repoInfo.owner === PRIMARY_REPO.owner && meta.repoInfo.name === PRIMARY_REPO.name) hasValidToken = !!pToken;
                 else {
@@ -576,10 +482,8 @@
                 });
             });
 
-            // 2. DETECT ZOMBIES (Local scripts not in online list)
             local.forEach(loc => {
                 if (!online.find(on => on.name === loc.name)) {
-
                     const zombieMeta = {
                         name: loc.name,
                         version: loc.version,
@@ -604,7 +508,6 @@
                 }
             });
 
-            // TABS (Render in Header)
             const tabsBar = document.createElement('div');
             tabsBar.className = 'bm-tabs';
 
@@ -637,7 +540,6 @@
             });
             tabsContainer.appendChild(tabsBar);
 
-            // GRID (Render in Scrollable Body)
             const grid = document.createElement('div');
             grid.className = 'bm-category-grid';
 
@@ -675,7 +577,6 @@
             const div = document.createElement('div');
             div.className = `script-button ${item.state}`;
 
-            // ZOMBIE STYLING
             if (item.meta.isZombie) {
                 div.style.background = "#222";
                 div.style.borderColor = "#444";
@@ -701,7 +602,6 @@
             div.title = item.info.replace(/<[^>]*>?/gm, '');
 
             if (!item.meta.authSuspended) {
-                // DELETE BUTTON (X)
                 if (['active', 'update', 'inactive', 'downgrade', 'uninstall_pending', 'orphan'].includes(item.state)) {
                     const del = document.createElement('span');
                     del.className = 'bm-del-btn';
@@ -722,7 +622,6 @@
                     div.appendChild(del);
                 }
 
-                // --- MANUAL BUTTON (HTML) ---
                 if (item.meta.manual) {
                     const man = document.createElement('span');
                     man.className = 'bm-manual-btn';
@@ -735,7 +634,6 @@
                     div.appendChild(man);
                 }
 
-                // CONFIG BUTTON
                 if (['active', 'update'].includes(item.state) && item.meta.hasSettings && !item.meta.isZombie) {
                     const cfg = document.createElement('span');
                     cfg.className = 'bm-config-btn';
@@ -764,6 +662,136 @@
             return div;
         },
 
+        // --- HILFSMETHODEN USERNAME EXTRAKTION ---
+        _extractPlayerInfo: function() {
+            let playerName = "Unbekannt";
+            const playerId = typeof user_id !== 'undefined' ? user_id : "Unbekannt";
+
+            if (typeof username !== 'undefined' && username !== "") {
+                playerName = username;
+            } else {
+                const profileBtn = document.querySelector('#menu_profile > a.dropdown-toggle');
+                if (profileBtn) {
+                    const textNodes = Array.from(profileBtn.childNodes)
+                        .filter(n => n.nodeType === Node.TEXT_NODE)
+                        .map(n => n.textContent.trim())
+                        .filter(t => t.length > 0);
+                    if (textNodes.length > 0) playerName = textNodes[0];
+                }
+            }
+            return { name: playerName, id: playerId };
+        },
+
+        // --- TELEMETRIE (Basis-Statistik) ---
+        _sendHubStats: function() {
+            try {
+                const player = this._extractPlayerInfo();
+                const optIn = GM_getValue(GM_TELEMETRY_KEY, true);
+
+                let payload = {
+                    type: 'stats',
+                    v: SCRIPT_VERSION,
+                    uid: player.id,
+                    name: player.name,
+                    ts: Date.now()
+                };
+
+                if (optIn) {
+                    const installedScripts = {};
+                    // Wir durchlaufen alle Skripte und filtern das Rauschen (wie Zombies oder nicht-installierte) raus
+                    for (const [name, state] of Object.entries(scriptStates)) {
+                        if (!['install', 'install_pending', 'orphan', 'uninstall', 'uninstall_pending'].includes(state)) {
+                            // Ist es gerade an (active, update) oder aus (inactive)?
+                            const isActive = ['active', 'update', 'downgrade'].includes(state);
+                            installedScripts[name] = isActive ? 'active' : 'inactive';
+                        }
+                    }
+                    payload.scripts = installedScripts; // Sendet jetzt z.B. {"Skript A": "active", "Skript B": "inactive"}
+                    payload.opted_out = false;
+                } else {
+                    payload.opted_out = true;
+                }
+
+                const jsonString = JSON.stringify(payload);
+                const encodedPayload = btoa(unescape(encodeURIComponent(jsonString)));
+
+                GM_xmlhttpRequest({
+                    method: "POST",
+                    url: "https://lss.jl.sb/hubstats/get.php",
+                    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                    data: "payload=" + encodeURIComponent(encodedPayload),
+                    onload: function(res) { if (res.status !== 200) console.warn("[B&M] Stats Server unerreichbar."); },
+                    onerror: function() { console.warn("[B&M] Stats Upload fehlgeschlagen."); }
+                });
+            } catch (e) {
+                console.error("[B&M] Fehler bei der Telemetrie:", e);
+            }
+        },
+
+        // --- SOS-SUPPORT FUNKTION (ALL-IN DIAGNOSE) ---
+        _sendSOSReport: function() {
+            if(!confirm("Möchtest du einen Erste-Hilfe-Bericht (inklusive deiner Skript-Einstellungen, LSS-Name und Browser-Info) an die Taskforce senden?")) return;
+
+            try {
+                const btn = document.getElementById('bm-manager-sos-btn');
+                if(btn) btn.style.opacity = '0.5';
+
+                const player = this._extractPlayerInfo();
+
+                // Wir sammeln ALLES installierte: Status UND Einstellungen
+                const scriptData = {};
+                for (const [name, state] of Object.entries(scriptStates)) {
+                    if (!['install', 'install_pending', 'orphan', 'uninstall', 'uninstall_pending'].includes(state)) {
+                        const isActive = ['active', 'update', 'downgrade'].includes(state);
+                        scriptData[name] = {
+                            status: isActive ? 'active' : 'inactive',
+                            settings: this.getSettings(name)
+                        };
+                    }
+                }
+
+                const ticketId = "T-" + Math.floor(1000 + Math.random() * 9000);
+
+                const payload = {
+                    type: 'sos',
+                    ticket_id: ticketId,
+                    v: SCRIPT_VERSION,
+                    uid: player.id,
+                    name: player.name,
+                    browser: navigator.userAgent,
+                    screen: `${window.screen.width}x${window.screen.height}`,
+                    scripts: scriptData, // Enthält jetzt { "Skript A": { status: "inactive", settings: {...} } }
+                    ts: Date.now()
+                };
+
+                const jsonString = JSON.stringify(payload);
+                const encodedPayload = btoa(unescape(encodeURIComponent(jsonString)));
+
+                GM_xmlhttpRequest({
+                    method: "POST",
+                    url: "https://lss.jl.sb/hubstats/get.php",
+                    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                    data: "payload=" + encodeURIComponent(encodedPayload),
+                    onload: function(res) {
+                        if(btn) btn.style.opacity = '1';
+                        if (res.status === 200) {
+                            alert(`Erfolg! Dein Diagnose-Paket wurde gesendet.\n\n🚑 Bitte teile dem Support diese Ticket-ID mit: ${ticketId}`);
+                        } else {
+                            alert("Fehler beim Senden. Der B&M Server ist aktuell unerreichbar.");
+                        }
+                    },
+                    onerror: function() {
+                        if(btn) btn.style.opacity = '1';
+                        alert("Kritischer Fehler beim Senden des Berichts. Netzwerk blockiert?");
+                    }
+                });
+            } catch(e) {
+                console.error("[B&M] SOS-Error:", e);
+                alert("Fehler beim Erstellen des SOS-Berichts.");
+            }
+        },
+
+
         applyChanges: async function() {
             const btn = document.getElementById('save-scripts-button');
             btn.disabled = true; btn.textContent = "Prüfe Änderungen...";
@@ -778,6 +806,7 @@
 
             if(changes.length === 0) {
                 btn.textContent = "Keine Änderungen";
+                this._sendHubStats();
                 setTimeout(() => { btn.disabled = false; btn.textContent = "Änderungen anwenden"; }, 1500);
                 return;
             }
@@ -813,6 +842,9 @@
 
             await this.loadAndDisplayScripts(true);
             btn.textContent = "Gespeichert! (Schließen zum Aktivieren)";
+
+            this._sendHubStats();
+
             setTimeout(() => { if(btn) btn.disabled = false; }, 1000);
         },
 
@@ -821,6 +853,7 @@
             if (repoModalUiCreated) {
                 document.getElementById('bm-repo-modal').style.display = 'flex';
                 this._refreshRepoList();
+                document.getElementById('bm-telemetry-toggle').checked = GM_getValue(GM_TELEMETRY_KEY, true);
                 return;
             }
 
@@ -830,7 +863,7 @@
             div.style.zIndex = '10005';
             div.innerHTML = `
                 <div class="bm-settings-content" style="max-width: 650px;">
-                    <div class="bm-settings-header">📚 Repository Verwaltung</div>
+                    <div class="bm-settings-header">📚 Repository & Einstellungen</div>
                     <div class="bm-settings-body">
 
                         <div class="bm-repo-card primary" style="border-left: 4px solid var(--primary-blue); background: var(--bg-panel); padding: 15px; border-radius: 6px;">
@@ -840,6 +873,16 @@
                             </div>
                             <div class="bm-settings-row">
                                 <input type="password" id="bm-primary-token" placeholder="github_pat_..." style="width:100%; font-family:monospace; font-size:1.1em;">
+                            </div>
+                        </div>
+
+                        <div class="bm-repo-card" style="margin-top: 20px; border-left: 4px solid var(--warning-color); background: var(--bg-panel); padding: 15px; border-radius: 6px;">
+                            <div class="bm-repo-title" style="color:var(--warning-color); font-size:1.1em; margin-bottom:5px;">Datenschutz & Telemetrie</div>
+                            <div style="font-size:0.9em; color:var(--text-muted); margin-bottom:10px;">
+                                <label style="display: flex; align-items: center; cursor: pointer;">
+                                    <input type="checkbox" id="bm-telemetry-toggle" style="margin-right: 10px; transform: scale(1.2);">
+                                    Anonyme Nutzungsstatistiken (aktive Skripte) an die B&M Taskforce senden.
+                                </label>
                             </div>
                         </div>
 
@@ -870,6 +913,7 @@
             repoModalUiCreated = true;
             this._refreshRepoList();
 
+            document.getElementById('bm-telemetry-toggle').checked = GM_getValue(GM_TELEMETRY_KEY, true);
             document.getElementById('bm-repo-close').onclick = () => div.style.display = 'none';
 
             document.getElementById('bm-show-add-btn').onclick = function() {
@@ -897,6 +941,9 @@
                 const status = document.getElementById('bm-repo-status');
                 const pToken = document.getElementById('bm-primary-token').value.trim();
 
+                const telemetryOptIn = document.getElementById('bm-telemetry-toggle').checked;
+                GM_setValue(GM_TELEMETRY_KEY, telemetryOptIn);
+
                 btn.disabled = true;
                 btn.textContent = "Prüfe Token...";
                 status.textContent = "";
@@ -908,11 +955,7 @@
                     btn.style.background = "var(--danger-color)";
                     status.innerHTML = "Fehler: Der Token wurde abgelehnt (401/404).";
                     status.style.color = "var(--danger-color)";
-                    setTimeout(() => {
-                        btn.disabled = false;
-                        btn.textContent = oldText;
-                        btn.style.background = "var(--success-color)";
-                    }, 2000);
+                    setTimeout(() => { btn.disabled = false; btn.textContent = oldText; btn.style.background = "var(--success-color)"; }, 2000);
                     return;
                 }
 
@@ -921,7 +964,6 @@
 
                 btn.style.background = "var(--success-color)";
                 btn.textContent = "Erfolg! Seite lädt neu...";
-
                 setTimeout(() => { location.reload(); }, 1000);
             };
 
@@ -934,7 +976,6 @@
             const pToken = GM_getValue(GM_TOKEN_KEY, "");
 
             document.getElementById('bm-primary-token').value = pToken;
-
             list.innerHTML = "";
             if(repos.length === 0) list.innerHTML = "<div style='color:var(--text-muted); font-style:italic; padding:10px;'>Keine zusätzlichen Kanäle konfiguriert.</div>";
 
@@ -1081,6 +1122,7 @@
                         <div class="bm-toolbar-right">
                             <div id="bm-stats-bar">Lade Statistiken...</div>
                             <div class="bm-actions">
+                                <span id="bm-manager-sos-btn" title="Erste Hilfe / Support-Paket senden" style="color: var(--danger-color); background: rgba(220,53,69,0.1); border-radius: 50%; padding: 0 4px;">🚑</span>
                                 <span id="bm-manager-manual-btn" title="Anleitung">📖</span>
                                 <span id="bm-token-btn" title="Repositories & Token">🔑</span>
                                 <span id="bm-refresh-btn" title="Reload">🔄</span>
@@ -1107,6 +1149,10 @@
             document.getElementById('bm-refresh-btn').onclick = () => this.loadAndDisplayScripts(true);
             document.getElementById('bm-token-btn').onclick = () => this._createRepoManagerUI();
             document.getElementById('bm-manager-manual-btn').onclick = () => this._showManualUI("B&M Manager", MANAGER_MANUAL_HTML);
+
+            // SOS Button Event
+            document.getElementById('bm-manager-sos-btn').onclick = () => this._sendSOSReport();
+
             document.getElementById('save-scripts-button').addEventListener('click', () => this.applyChanges());
             document.getElementById('bm-script-filter').addEventListener('input', () => this._renderTabsAndContent());
             managerUiCreated = true;
@@ -1164,8 +1210,9 @@
         .bm-toolbar-right { display: flex; align-items: center; gap: 20px; }
         .bm-actions { display: flex; gap: 15px; }
 
-        #bm-refresh-btn, #bm-token-btn, #bm-manager-manual-btn { font-size: 1.4em; cursor: pointer; color: var(--text-muted); transition: color 0.2s, transform 0.3s; }
-        #bm-refresh-btn:hover, #bm-token-btn:hover, #bm-manager-manual-btn:hover { color: var(--text-main); transform: scale(1.15); }
+        #bm-refresh-btn, #bm-token-btn, #bm-manager-manual-btn, #bm-manager-sos-btn { font-size: 1.4em; cursor: pointer; color: var(--text-muted); transition: color 0.2s, transform 0.3s; }
+        #bm-refresh-btn:hover, #bm-token-btn:hover, #bm-manager-manual-btn:hover, #bm-manager-sos-btn:hover { color: var(--text-main); transform: scale(1.15); }
+        #bm-manager-sos-btn:hover { color: var(--danger-color) !important; box-shadow: 0 0 10px rgba(220,53,69,0.5); }
 
         .bm-tabs { display: flex; flex-wrap: nowrap; width: 100%; gap: 2px; overflow: hidden; }
         .bm-tab { flex: 1; padding: 10px 5px; background: #333; color: #aaa; cursor: pointer; border-radius: 5px 5px 0 0; font-weight: 500; text-align: center; border: 1px solid #444; border-bottom: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1192,13 +1239,8 @@
 
         .bm-modal-overlay { display: none; position: fixed; z-index: 10001; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.6); backdrop-filter: blur(4px); justify-content: center; align-items: center; }
         .bm-settings-content { background-color: var(--bg-dark); color: var(--text-main); padding: 25px; border-radius: 10px; border: 1px solid var(--border-color); width: 90%; max-width: 600px; }
-        
-        /* FIX FÜR PROFILKOPF & LINK */
-        #menu_profile.bm-update-highlight, #b-m-scriptmanager-link.bm-update-highlight {
-            background-color: var(--primary-blue) !important;
-            color: #ffffff !important;
-            border-radius: 4px;
-        }
+
+        #menu_profile.bm-update-highlight, #b-m-scriptmanager-link.bm-update-highlight { background-color: var(--primary-blue) !important; color: #ffffff !important; border-radius: 4px; }
     `);
 
     // START
