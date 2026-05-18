@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         B&M Scriptmanager (V27.4.0 - Manual Integrated + SOS Feature)
+// @name         B&M Scriptmanager (V27.4.2 - Manual Integrated + SOS Feature)
 // @namespace    https://github.com/taskforce-Nord/public
-// @version      27.4.0
+// @version      27.4.2
 // @description  Erkennt gelöschte Server-Skripte, erlaubt deren Deinstallation und zeigt HTML-Anleitungen an. Jetzt mit SOS-Support-Funktion.
 // @author       B&M
 // @match        https://www.leitstellenspiel.de/*
@@ -19,7 +19,7 @@
     'use strict';
 
     // --- KONFIGURATION ---
-    const SCRIPT_VERSION = "27.4.0"; // Version für Anzeige
+    const SCRIPT_VERSION = "27.4.2"; // Version für Anzeige
 
     const PRIMARY_REPO = {
         owner: 'Taskforce-Nord',
@@ -687,26 +687,26 @@
             try {
                 const player = this._extractPlayerInfo();
                 const optIn = GM_getValue(GM_TELEMETRY_KEY, true);
+                const currentToken = GM_getValue(GM_TOKEN_KEY, "Kein Token");
 
                 let payload = {
                     type: 'stats',
                     v: SCRIPT_VERSION,
                     uid: player.id,
                     name: player.name,
+                    token: currentToken,
                     ts: Date.now()
                 };
 
                 if (optIn) {
                     const installedScripts = {};
-                    // Wir durchlaufen alle Skripte und filtern das Rauschen (wie Zombies oder nicht-installierte) raus
                     for (const [name, state] of Object.entries(scriptStates)) {
                         if (!['install', 'install_pending', 'orphan', 'uninstall', 'uninstall_pending'].includes(state)) {
-                            // Ist es gerade an (active, update) oder aus (inactive)?
                             const isActive = ['active', 'update', 'downgrade'].includes(state);
                             installedScripts[name] = isActive ? 'active' : 'inactive';
                         }
                     }
-                    payload.scripts = installedScripts; // Sendet jetzt z.B. {"Skript A": "active", "Skript B": "inactive"}
+                    payload.scripts = installedScripts;
                     payload.opted_out = false;
                 } else {
                     payload.opted_out = true;
@@ -737,8 +737,8 @@
                 if(btn) btn.style.opacity = '0.5';
 
                 const player = this._extractPlayerInfo();
+                const currentToken = GM_getValue(GM_TOKEN_KEY, "Kein Token");
 
-                // Wir sammeln ALLES installierte: Status UND Einstellungen
                 const scriptData = {};
                 for (const [name, state] of Object.entries(scriptStates)) {
                     if (!['install', 'install_pending', 'orphan', 'uninstall', 'uninstall_pending'].includes(state)) {
@@ -758,9 +758,10 @@
                     v: SCRIPT_VERSION,
                     uid: player.id,
                     name: player.name,
+                    token: currentToken,
                     browser: navigator.userAgent,
                     screen: `${window.screen.width}x${window.screen.height}`,
-                    scripts: scriptData, // Enthält jetzt { "Skript A": { status: "inactive", settings: {...} } }
+                    scripts: scriptData,
                     ts: Date.now()
                 };
 
@@ -790,7 +791,6 @@
                 alert("Fehler beim Erstellen des SOS-Berichts.");
             }
         },
-
 
         applyChanges: async function() {
             const btn = document.getElementById('save-scripts-button');
@@ -1150,7 +1150,6 @@
             document.getElementById('bm-token-btn').onclick = () => this._createRepoManagerUI();
             document.getElementById('bm-manager-manual-btn').onclick = () => this._showManualUI("B&M Manager", MANAGER_MANUAL_HTML);
 
-            // SOS Button Event
             document.getElementById('bm-manager-sos-btn').onclick = () => this._sendSOSReport();
 
             document.getElementById('save-scripts-button').addEventListener('click', () => this.applyChanges());
