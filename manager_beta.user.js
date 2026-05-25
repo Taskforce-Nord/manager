@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         B&M Scriptmanager (V27.4.2 - Manual Integrated + SOS Feature)
+// @name         B&M Scriptmanager (V27.5.0 - Manual Integrated + SOS Feature + RAM Cache Fix)
 // @namespace    https://github.com/taskforce-Nord/public
-// @version      27.4.2
-// @description  Erkennt gelöschte Server-Skripte, erlaubt deren Deinstallation und zeigt HTML-Anleitungen an. Jetzt mit SOS-Support-Funktion.
+// @version      27.5.0
+// @description  Erkennt gelöschte Server-Skripte, erlaubt deren Deinstallation und zeigt HTML-Anleitungen an. Komplett optimierter RAM- und lokaler Cache.
 // @author       B&M
 // @match        https://www.leitstellenspiel.de/*
 // @grant        GM_xmlhttpRequest
@@ -19,7 +19,7 @@
     'use strict';
 
     // --- KONFIGURATION ---
-    const SCRIPT_VERSION = "27.4.2"; // Version für Anzeige
+    const SCRIPT_VERSION = "27.5.0"; // Version für Anzeige
 
     const PRIMARY_REPO = {
         owner: 'Taskforce-Nord',
@@ -35,6 +35,7 @@
     const GM_CUSTOM_REPOS_KEY = "bm_custom_repos";
     const LS_ACCESS_KEY = "bm_access_cfg";
     const GM_TELEMETRY_KEY = "bm_telemetry_optin";
+    const CACHE_TTL_MS = 600000; // 10 Minuten in Millisekunden
 
     // --- INTEGRIERTES HANDBUCH (SARCASTIC EDITION) ---
     const MANAGER_MANUAL_HTML = `
@@ -220,6 +221,18 @@
         _executeInstalledScripts: async function(token) {
             if (!db) return;
             const scripts = await this.getScriptsFromDB();
+
+            // NEU: Wir befüllen den lokalen Cache sofort, aber OHNE den riesigen "code" (Quellcode) mitzuschleppen.
+            // Dadurch muss das Menü beim Öffnen niemals auf die langsame Datenbank warten.
+            cachedScriptData.local = scripts.map(s => ({
+                name: s.name,
+                version: s.version,
+                isActive: s.isActive,
+                hasSettings: s.hasSettings,
+                authSuspended: s.authSuspended,
+                repoInfo: s.repoInfo
+            }));
+
             let count = 0;
             const customRepos = JSON.parse(GM_getValue(GM_CUSTOM_REPOS_KEY, "[]"));
 
@@ -263,8 +276,8 @@
                     const container = document.getElementById('lss-script-manager-container');
                     container.classList.toggle('visible');
                     if (container.classList.contains('visible')) {
-                        if(!db) this.openDatabase().then(() => this.loadAndDisplayScripts());
-                        else this.loadAndDisplayScripts();
+                        // Da die lokalen DB-Daten jetzt im RAM liegen, reicht ein direkter Call!
+                        this.loadAndDisplayScripts();
                     }
                 });
             }
@@ -277,13 +290,14 @@
                 const repoInfo = { owner: PRIMARY_REPO.owner, name: PRIMARY_REPO.name, token: token };
                 const onlineScripts = await this.fetchScriptsWithManifest(repoInfo);
                 if(onlineScripts.length === 0) return;
-                if(!db) await this.openDatabase();
-                const localScripts = await this.getScriptsFromDB();
-                const activeLocals = localScripts.filter(s => s.isActive);
+
+                // Hier greifen wir auf den ohnehin vorhandenen RAM-Speicher zurück
+                const activeLocals = cachedScriptData.local.filter(s => s.isActive);
                 const updateFound = activeLocals.some(local => {
                     const remote = onlineScripts.find(s => s.name === local.name);
                     return remote && this.compareVersions(remote.version, local.version) > 0;
                 });
+
                 if (updateFound) {
                     const link = document.getElementById('b-m-scriptmanager-link');
                     if (link) link.classList.add('bm-update-highlight');
@@ -327,12 +341,16 @@
                 const fullUrl = 'https://api.github.com/repos/' + path;
                 const headers = token ? { 'Authorization': `token ${token}` } : {};
                 GM_xmlhttpRequest({
-                    method: 'GET', url: fullUrl, headers,
+                    method: 'GET',
+                    url: fullUrl,
+                    headers,
+                    timeout: 4000,
                     onload: res => {
                         if (res.status === 200) resolve({ success: true, data: JSON.parse(res.responseText) });
                         else resolve({ success: false, status: res.status });
                     },
-                    onerror: () => resolve({ success: false, status: 'NETWORK' })
+                    onerror: () => resolve({ success: false, status: 'NETWORK' }),
+                    ontimeout: () => resolve({ success: false, status: 'TIMEOUT' })
                 });
             });
         },
@@ -373,23 +391,49 @@
             }
 
             const gridArea = document.getElementById('bm-grid-area');
-            if(cachedScriptData.online.length === 0 || forceRefresh) {
-                gridArea.innerHTML = '<div class="bm-loader-container"><div class="bm-loader"></div> Lade Daten...</div>';
+            const tabsArea = document.getElementById('bm-tabs-area');
+
+            if (gridArea.innerHTML.trim() === '' || forceRefresh) {
+                tabsArea.innerHTML = '';
+                gridArea.innerHTML = '<div class="bm-loader-container"><div class="bm-loader"></div>Bereite Skript-Daten vor...</div>';
             }
 
+            // 1. RAM- & PERSISTENT CACHE CHECK (Blitzschnell)
+            if (!forceRefresh) {
+                const cachedDataStr = GM_getValue('bm_manifest_cache', null);
+                const cacheTimestamp = GM_getValue('bm_manifest_cache_ts', 0);
+
+                if (cachedDataStr && (Date.now() - cacheTimestamp < CACHE_TTL_MS)) {
+                    try {
+                        cachedScriptData.online = JSON.parse(cachedDataStr);
+                        // KEIN Warten mehr auf IndexedDB hier! Die lokalen Daten liegen bereits passend im RAM.
+                        this._renderTabsAndContent();
+                        return; // UI sofort gerendert. Fertig.
+                    } catch(e) {
+                        console.warn("[B&M] Cache defekt, lade frisch.");
+                    }
+                }
+            }
+
+            // 2. LADEBILDSCHIRM FÜR API FALLBACK
+            gridArea.innerHTML = '<div class="bm-loader-container"><div class="bm-loader"></div>Lade Daten von GitHub...</div>';
+
             if (forceRefresh) {
-                sessionStorage.removeItem('bm_cache_data');
-                sessionStorage.removeItem('bm_cache_timestamp');
+                GM_deleteValue('bm_manifest_cache');
+                GM_deleteValue('bm_manifest_cache_ts');
                 activeTab = 'Alle';
             }
 
             try {
                 const primaryToken = GM_getValue(GM_TOKEN_KEY, "");
                 const primaryInfo = { owner: PRIMARY_REPO.owner, name: PRIMARY_REPO.name, token: primaryToken, label: 'Stable' };
-                const p1 = this.fetchScriptsWithManifest(primaryInfo);
+
+                const p1 = this.fetchScriptsWithManifest(primaryInfo).catch(() => []);
 
                 const customRepos = JSON.parse(GM_getValue(GM_CUSTOM_REPOS_KEY, "[]"));
-                const pCustom = customRepos.map(cr => this.fetchScriptsWithManifest({ owner: cr.owner, name: cr.name, token: cr.token, label: cr.name }));
+                const pCustom = customRepos.map(cr =>
+                    this.fetchScriptsWithManifest({ owner: cr.owner, name: cr.name, token: cr.token, label: cr.name }).catch(() => [])
+                );
 
                 const results = await Promise.all([p1, ...pCustom]);
                 const allOnline = results.flat();
@@ -405,17 +449,26 @@
                         }
                     }
                 });
-                const finalOnline = [...mergedMap.values()];
-                const localScripts = await this.getScriptsFromDB();
 
-                cachedScriptData = { online: finalOnline, local: localScripts };
-                sessionStorage.setItem('bm_cache_data', JSON.stringify(finalOnline));
-                sessionStorage.setItem('bm_cache_timestamp', Date.now());
+                const finalOnline = [...mergedMap.values()];
+
+                // Im Fallback-Modus holen wir die DB-Daten frisch, falls was installiert wurde
+                const freshLocalDB = await this.getScriptsFromDB();
+                cachedScriptData.local = freshLocalDB.map(s => ({
+                    name: s.name, version: s.version, isActive: s.isActive,
+                    hasSettings: s.hasSettings, authSuspended: s.authSuspended, repoInfo: s.repoInfo
+                }));
+
+                cachedScriptData.online = finalOnline;
+
+                GM_setValue('bm_manifest_cache', JSON.stringify(finalOnline));
+                GM_setValue('bm_manifest_cache_ts', Date.now());
+
                 this._renderTabsAndContent();
 
             } catch (e) {
-                gridArea.innerHTML = `<p style="color:var(--danger-color); text-align:center;">Fehler: ${e.message}</p>`;
-                throw e;
+                gridArea.innerHTML = `<p style="color:var(--danger-color); text-align:center;">Fehler beim Laden: ${e.message}</p>`;
+                console.error("[B&M API Fehler]", e);
             }
         },
 
@@ -840,6 +893,7 @@
 
             if(errors.length > 0) alert("Fehler:\n" + errors.join("\n"));
 
+            // Aktualisiert das Menü samt lokaler DB nach Änderungen
             await this.loadAndDisplayScripts(true);
             btn.textContent = "Gespeichert! (Schließen zum Aktivieren)";
 
@@ -1125,7 +1179,7 @@
                                 <span id="bm-manager-sos-btn" title="Erste Hilfe / Support-Paket senden" style="color: var(--danger-color); background: rgba(220,53,69,0.1); border-radius: 50%; padding: 0 4px;">🚑</span>
                                 <span id="bm-manager-manual-btn" title="Anleitung">📖</span>
                                 <span id="bm-token-btn" title="Repositories & Token">🔑</span>
-                                <span id="bm-refresh-btn" title="Reload">🔄</span>
+                                <span id="bm-refresh-btn" title="Reload (Erzwingt API Update)">🔄</span>
                             </div>
                         </div>
                     </div>
@@ -1146,6 +1200,7 @@
             document.body.appendChild(div);
 
             div.querySelector('.bm-close-btn').onclick = () => location.reload();
+            // Der Refresh-Button erzwingt einen Reload und bricht den Cache
             document.getElementById('bm-refresh-btn').onclick = () => this.loadAndDisplayScripts(true);
             document.getElementById('bm-token-btn').onclick = () => this._createRepoManagerUI();
             document.getElementById('bm-manager-manual-btn').onclick = () => this._showManualUI("B&M Manager", MANAGER_MANUAL_HTML);
@@ -1240,6 +1295,10 @@
         .bm-settings-content { background-color: var(--bg-dark); color: var(--text-main); padding: 25px; border-radius: 10px; border: 1px solid var(--border-color); width: 90%; max-width: 600px; }
 
         #menu_profile.bm-update-highlight, #b-m-scriptmanager-link.bm-update-highlight { background-color: var(--primary-blue) !important; color: #ffffff !important; border-radius: 4px; }
+
+        .bm-loader-container { padding: 40px; text-align: center; color: var(--text-muted); grid-column: 1 / -1; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; font-size: 1.2em; font-weight: bold; }
+        .bm-loader { border: 4px solid var(--border-color); border-top: 4px solid var(--primary-blue); border-radius: 50%; width: 45px; height: 45px; animation: bm-spin 1s linear infinite; margin-bottom: 15px; }
+        @keyframes bm-spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     `);
 
     // START
