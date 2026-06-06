@@ -335,6 +335,10 @@
         async function init() {
             createUI();
 
+            // NEU: Wir fragen DEINE Datenbank sofort ab, ohne zu warten!
+            loadFilters();
+
+            // LSS-Wachen laden (das ist der Teil, der die Sekunden frisst)
             try {
                 playerWachen = await new Promise((resolve, reject) => {
                     GM_xmlhttpRequest({
