@@ -22,7 +22,7 @@
     const isGameWindow = window.location.host.includes('leitstellenspiel.de');
     const isListWindow = window.location.host.includes('tfn.tw');
 
-    const projectName = '🏢 Reale Gebäudeliste (v2.4.0)';
+    const projectName = '🏢 Reale Gebäudeliste (v2.4.5)';
     const commandChannel = 'reale_liste_command';
     const progressChannel = 'reale_liste_progress';
     const apiUrl = 'https://tfn.tw/wachliste_api.php';
