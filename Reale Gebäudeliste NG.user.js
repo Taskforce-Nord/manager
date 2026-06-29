@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reale Gebäudeliste (Next-Gen API-Version) + Gnadenlos + B&M Auth
 // @namespace    http://tampermonkey.net/
-// @version      2.4.0
+// @version      2.4.5
 // @description  Komplett datenbankgestützte, dynamische Gebäudeliste via Server-Schnittstelle. Inkl. Gnadenlos-Bauen & B&M Auth!
 // @author       Whice + Masklin + B&M
 // @match        https://*.leitstellenspiel.de/
@@ -487,9 +487,16 @@
         function checkIfOwned(realWache) {
             const latTol = 0.0027, lonTol = 0.0043;
             const rLat = parseFloat(realWache.lat), rLon = parseFloat(realWache.lon);
+
+            // 1. Hole die Ziel-Typ-ID der realen Wache über die bestehende Funktion
+            const targetBuildingType = getGameTypeId(realWache);
+
             return playerWachen.find(pw =>
+                // 2. Prüfe die Koordinaten...
                 pw.latitude <= rLat + latTol && pw.latitude >= rLat - latTol &&
-                pw.longitude <= rLon + lonTol && pw.longitude >= rLon - lonTol
+                pw.longitude <= rLon + lonTol && pw.longitude >= rLon - lonTol &&
+                // 3. ...UND prüfe, ob der Gebäudetyp übereinstimmt!
+                pw.building_type === targetBuildingType
             );
         }
 
