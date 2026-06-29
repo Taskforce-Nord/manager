@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @version      2.4.5
 // @description  Komplett datenbankgestützte, dynamische Gebäudeliste via Server-Schnittstelle. Inkl. Gnadenlos-Bauen & B&M Auth!
-// @author       Whice + Masklin + B&M
+// @author       Masklin
 // @match        https://*.leitstellenspiel.de/
 // @match        https://tfn.tw/0
 // @connect      tfn.tw
