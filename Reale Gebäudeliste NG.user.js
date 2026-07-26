@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reale Gebäudeliste (Next-Gen API-Version) + Gnadenlos + B&M Auth
 // @namespace    http://tampermonkey.net/
-// @version      2.4.5
+// @version      2.4.7
 // @description  Komplett datenbankgestützte, dynamische Gebäudeliste via Server-Schnittstelle. Inkl. Gnadenlos-Bauen & B&M Auth!
 // @author       Masklin
 // @match        https://*.leitstellenspiel.de/
@@ -506,7 +506,10 @@
                 if (['NA', 'RW'].includes(wache.wachenart)) return 2;
                 return 0;
             }
-            if (wache.organisation === 'Rettungsdienst') return 2;
+            if (wache.organisation === 'Rettungsdienst') {
+                if (wache.wachenart === 'LRZ') return 5; // Rettungshubschrauber-Station
+                return 2; // Normale Rettungswache
+            }
             if (wache.organisation === 'THW') return 9;
             if (wache.organisation === 'Polizei') {
                 if (['BEPOL', 'BPOL', 'Bereitschaftspolizei'].includes(wache.wachenart)) return 11;
