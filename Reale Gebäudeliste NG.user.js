@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Reale Gebäudeliste (Next-Gen API-Version) + Gnadenlos + B&M Auth
 // @namespace    http://tampermonkey.net/
-// @version      2.4.7
-// @description  Komplett datenbankgestützte, dynamische Gebäudeliste via Server-Schnittstelle. Inkl. Gnadenlos-Bauen & B&M Auth!
+// @version      2.5.3
+// @description  Komplett datenbankgestützte, dynamische Gebäudeliste via Server-Schnittstelle. Inkl. Gnadenlos-Bauen, konfigurierbare LST-Zuweisung & B&M Auth!
 // @author       Masklin
 // @match        https://*.leitstellenspiel.de/
 // @match        https://tfn.tw/0
@@ -22,10 +22,29 @@
     const isGameWindow = window.location.host.includes('leitstellenspiel.de');
     const isListWindow = window.location.host.includes('tfn.tw');
 
-    const projectName = '🏢 Reale Gebäudeliste (v2.4.5)';
+    const projectName = '🏢 Reale Gebäudeliste (v2.5.3)';
     const commandChannel = 'reale_liste_command';
     const progressChannel = 'reale_liste_progress';
+    const buildingsCacheKey = 'reale_liste_buildings_cache';
     const apiUrl = 'https://tfn.tw/wachliste_api.php';
+    const lstAssignKey = 'reale_liste_lst_assignments';
+
+    // Wachentypen, die über die Liste / Gnadenlos gebaut werden können
+    const BUILDING_TYPE_LABELS = {
+        0: 'Feuerwache',
+        1: 'Feuerwehrschule',
+        2: 'Rettungswache',
+        5: 'Rettungshubschrauber-Station',
+        6: 'Polizeiwache',
+        9: 'THW',
+        11: 'Bereitschaftspolizei',
+        12: 'SEG',
+        13: 'Polizeihubschrauberstation',
+        15: 'Wasserrettung',
+        17: 'Polizei-Sondereinheiten',
+        26: 'Seenotrettungsstation',
+        28: 'Bergrettungswache'
+    };
 
     // --- 2. CODE FÜR DAS SPIELFENSTER (TAB A) ---
     if (isGameWindow) {
@@ -51,6 +70,25 @@
         GM_setValue("reale_liste_user_id", lssUserId);
         GM_setValue("reale_liste_user_name", lssPlayerName);
 
+        // Gebäude same-origin laden und für das Listenfenster cachen (Cookies funktionieren hier)
+        async function syncBuildingsToCache() {
+            try {
+                const res = await fetch('/api/buildings', { credentials: 'same-origin' });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const buildings = await res.json();
+                if (!Array.isArray(buildings)) throw new Error('Unerwartetes API-Format');
+                GM_setValue(buildingsCacheKey, JSON.stringify({
+                    updatedAt: Date.now(),
+                    buildings
+                }));
+                console.log(`${projectName}: ${buildings.length} Gebäude in Cache geschrieben.`);
+                return buildings;
+            } catch (err) {
+                console.error(`${projectName}: Gebäude-Sync fehlgeschlagen:`, err);
+                return null;
+            }
+        }
+
         function setupGameWindow() {
             const menuProfile = document.getElementById('menu_profile');
             if (!menuProfile || !menuProfile.nextElementSibling) {
@@ -71,9 +109,11 @@
             const menuButtonA = document.createElement("a");
             menuButtonA.textContent = projectName;
             menuButtonA.onclick = function() {
+                // window.open MUSS synchron im Click-Handler laufen (sonst Popup-Blocker)
                 const w = Math.min(1200, window.screen.width * 0.7);
                 const h = Math.min(900, window.screen.height * 0.8);
                 window.open('https://tfn.tw/0', 'buildingListWindow', `width=${w},height=${h},resizable=yes`);
+                syncBuildingsToCache();
             };
 
             menuButton.appendChild(menuButtonA);
@@ -95,6 +135,10 @@
                     GM_setValue('reale_liste_config_' + currentType, JSON.stringify(settings));
                 }
             });
+
+            // Initial + periodisch cachen, damit das Listenfenster Leitstellen hat
+            syncBuildingsToCache();
+            setInterval(syncBuildingsToCache, 5 * 60 * 1000);
         }
 
         function createOrUpdateProgressOverlay(current, max, lastBuilding, successCount) {
@@ -128,6 +172,11 @@
         GM_addValueChangeListener(commandChannel, (name, old_val, new_val, remote) => {
             if (!remote || !new_val) return;
             const cmd = JSON.parse(new_val);
+
+            if (cmd.action === 'sync_buildings') {
+                syncBuildingsToCache();
+                return;
+            }
 
             // 🔥 GNADENLOS BATCH WORKER
             if (cmd.action === 'gnadenlos_batch') {
@@ -298,22 +347,72 @@
         let playerWachen = [];
         let serverWachenResult = [];
         let hideExisting = false;
-        let lstMap = { bau: null, thw: null, bpol: null };
+        let leitstellen = []; // alle Gebäude mit building_type === 7
+        let lstAssignments = loadLstAssignments(); // { [typeId]: lstId|null, fallback: lstId|null }
         let activeFilters = { bundesland: 'all', kreis: 'all', organisation: 'all', wachenart: 'all', term: '', plz: '' };
+
+        function loadLstAssignments() {
+            try {
+                const raw = GM_getValue(lstAssignKey, '');
+                if (raw) return JSON.parse(raw);
+            } catch (e) { /* ignore */ }
+            return { fallback: null };
+        }
+
+        function saveLstAssignments() {
+            GM_setValue(lstAssignKey, JSON.stringify(lstAssignments));
+            updateLstStatus();
+        }
+
+        function getLstForType(gameType) {
+            const key = String(gameType);
+            if (lstAssignments[key] != null && lstAssignments[key] !== '') {
+                return lstAssignments[key];
+            }
+            if (lstAssignments.fallback != null && lstAssignments.fallback !== '') {
+                return lstAssignments.fallback;
+            }
+            return null;
+        }
+
+        function getLstName(id) {
+            if (id == null || id === '') return '— keine —';
+            const lst = leitstellen.find(l => l.id == id);
+            return lst ? lst.caption : `ID ${id}`;
+        }
+
+        function updateLstStatus() {
+            const lstUI = document.getElementById('lst-status');
+            if (!lstUI) return;
+            const mapped = Object.keys(BUILDING_TYPE_LABELS).filter(k => lstAssignments[k] != null && lstAssignments[k] !== '').length;
+            const hasFallback = lstAssignments.fallback != null && lstAssignments.fallback !== '';
+            lstUI.textContent = hasFallback
+                ? `LST: ${mapped} Typen + Fallback (${getLstName(lstAssignments.fallback)})`
+                : (mapped > 0 ? `LST: ${mapped} Typen zugewiesen` : 'LST: nicht konfiguriert');
+            lstUI.style.color = (hasFallback || mapped > 0) ? '#28a745' : '#dc3545';
+            lstUI.title = 'Zuweisungen im Tab „Einstellungen“ festlegen';
+        }
 
         function createUI() {
             const style = document.createElement('style');
             style.textContent = `
-                body { margin: 0; font-family: sans-serif; background-color: #2b2b2b; color: #e0e0e0; overflow: hidden; }
-                .wrapper { display: flex; flex-direction: column; height: 100vh; }
-                .header { display: flex; justify-content: space-between; align-items: center; padding: 10px 15px; background: #3c3c3c; border-bottom: 1px solid #444; }
-                .filter-bar { display: flex; flex-wrap: wrap; gap: 10px; padding: 10px 15px; background: #3c3c3c; border-bottom: 1px solid #444; align-items: center; }
+                html, body { margin: 0; height: 100%; overflow: hidden; }
+                body { font-family: sans-serif; background-color: #2b2b2b; color: #e0e0e0; }
+                .wrapper { display: flex; flex-direction: column; height: 100%; max-height: 100vh; box-sizing: border-box; }
+                .header { display: flex; justify-content: space-between; align-items: center; padding: 10px 15px; background: #3c3c3c; border-bottom: 1px solid #444; flex-shrink: 0; }
+                .tab-bar { display: flex; gap: 0; background: #333; border-bottom: 1px solid #444; flex-shrink: 0; }
+                .tab-btn { padding: 10px 18px; background: transparent; color: #aaa; border: none; border-bottom: 2px solid transparent; cursor: pointer; font-size: 13px; }
+                .tab-btn:hover { color: #e0e0e0; background: #3a3a3a; }
+                .tab-btn.active { color: #fff; border-bottom-color: #0d6efd; background: #3c3c3c; }
+                .tab-panel { display: none; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+                .tab-panel.active { display: flex; }
+                .filter-bar { display: flex; flex-wrap: wrap; gap: 10px; padding: 10px 15px; background: #3c3c3c; border-bottom: 1px solid #444; align-items: center; flex-shrink: 0; }
                 select, input[type="text"] { padding: 6px; border-radius: 4px; border: 1px solid #666; background: #444; color: #e0e0e0; min-width: 160px; }
                 input[type="text"] { flex: 1; }
                 .btn { padding: 6px 12px; background: #555; color: white; border: 1px solid #666; border-radius: 4px; cursor: pointer; transition: all 0.2s; }
                 .btn.active { background: #0d6efd; border-color: #0d6efd; }
                 .btn-search { background: #28a745; border-color: #28a745; font-weight: bold; }
-                .wachen-container { flex: 1; overflow-y: auto; padding: 5px 0; }
+                .wachen-container { flex: 1; overflow-y: auto; padding: 5px 0; min-height: 0; }
                 .wache-row { display: grid; grid-template-columns: 1fr auto auto; align-items: center; padding: 10px 15px; border-bottom: 1px solid #444; gap: 15px; }
                 .wache-row:nth-child(even) { background-color: #333; }
                 .info-sub { font-size: 0.85em; color: #aaa; margin-top: 2px; }
@@ -324,8 +423,23 @@
                 .btn-go { color: #58a6ff; border-color: #58a6ff; }
                 .btn-build { color: #f0ad4e; border-color: #f0ad4e; }
                 .loading { padding: 30px; text-align: center; color: #aaa; font-size: 1.2em; }
+                .settings-toolbar { flex-shrink: 0; padding: 10px 16px 8px; border-bottom: 1px solid #444; background: #333; }
+                .settings-toolbar .settings-hint { margin: 0; }
+                .settings-wrap { flex: 1; overflow-y: auto; padding: 10px 16px 16px; min-height: 0; box-sizing: border-box; }
+                .settings-intro { color: #aaa; font-size: 0.85em; margin: 0 0 10px; max-width: 720px; line-height: 1.35; }
+                .settings-table { width: 100%; max-width: 720px; border-collapse: collapse; }
+                .settings-table th { text-align: left; padding: 6px 10px; border-bottom: 2px solid #555; color: #aaa; font-size: 0.85em; font-weight: normal; }
+                .settings-table td { padding: 6px 10px; border-bottom: 1px solid #444; vertical-align: middle; }
+                .settings-table select { width: 100%; min-width: 220px; }
+                .settings-fallback { margin-top: 14px; padding: 12px 14px; background: #333; border-radius: 6px; max-width: 720px; border: 1px solid #555; }
+                .settings-fallback label { display: block; margin-bottom: 8px; font-weight: bold; }
+                .settings-actions { flex-shrink: 0; padding: 10px 16px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; border-top: 1px solid #444; background: #3c3c3c; }
+                .settings-hint { color: #888; font-size: 0.85em; }
             `;
             document.head.appendChild(style);
+
+            // Host-Seite (tfn.tw) leeren, damit nichts Höhe frisst / überlagert
+            document.body.replaceChildren();
 
             const view = document.createElement('div');
             view.className = 'wrapper';
@@ -334,34 +448,213 @@
                     <div style="display: flex; align-items: baseline; gap: 15px;">
                         <h3 style="margin:0">${projectName}</h3>
                         <span id="status-counter" style="color: #28a745; font-size: 0.9em; font-weight: bold;">Verbinde zur Datenbank...</span>
-                        <span id="lst-status" style="color: #f0ad4e; font-size: 0.85em; margin-left: 10px; cursor: help;" title="Die LST IDs aus dem Spiel">Suche LST...</span>
+                        <span id="lst-status" style="color: #f0ad4e; font-size: 0.85em; margin-left: 10px; cursor: help;" title="Zuweisungen im Tab Einstellungen">LST: lade...</span>
                     </div>
                     <button class="btn" onclick="window.close()">×</button>
                 </div>
-                <div class="filter-bar">
-                    <select id="sel-bundesland"><option value="all">Alle Bundesländer</option></select>
-                    <select id="sel-kreis"><option value="all">Alle Kreise</option></select>
-                    <select id="sel-orga"><option value="all">Alle Organisationen</option></select>
-                    <select id="sel-wachenart"><option value="all">Alle Wachenarten</option></select>
+                <div class="tab-bar">
+                    <button type="button" class="tab-btn active" data-tab="liste">📋 Liste</button>
+                    <button type="button" class="tab-btn" data-tab="settings">⚙️ Einstellungen</button>
                 </div>
-                <div class="filter-bar">
-                    <input type="text" id="inp-search" placeholder="Suche nach Name (Wildcard)...">
-                    <input type="text" id="inp-plz" placeholder="PLZ..." style="max-width: 100px;">
-                    <button id="btn-toggle-existing" class="btn">Nur Fehlende</button>
-                    <button id="btn-submit-search" class="btn btn-search">🔍 Wachen laden</button>
 
-                    <div style="margin-left: auto; display: flex; align-items: center; gap: 10px;">
-                        <label style="cursor: pointer; font-size: 0.9em; color: #ffc107;" title="Öffne F12 Konsole für Details!">
-                            <input type="checkbox" id="chk-debug" checked> <b>Debug (Nur Loggen)</b>
-                        </label>
-                        <button id="btn-gnadenlos" class="btn" style="background: #dc3545; border-color: #dc3545; font-weight: bold;">🔥 Gnadenlos Bauen</button>
+                <div id="tab-liste" class="tab-panel active">
+                    <div class="filter-bar">
+                        <select id="sel-bundesland"><option value="all">Alle Bundesländer</option></select>
+                        <select id="sel-kreis"><option value="all">Alle Kreise</option></select>
+                        <select id="sel-orga"><option value="all">Alle Organisationen</option></select>
+                        <select id="sel-wachenart"><option value="all">Alle Wachenarten</option></select>
+                    </div>
+                    <div class="filter-bar">
+                        <input type="text" id="inp-search" placeholder="Suche nach Name (Wildcard)...">
+                        <input type="text" id="inp-plz" placeholder="PLZ..." style="max-width: 100px;">
+                        <button id="btn-toggle-existing" class="btn">Nur Fehlende</button>
+                        <button id="btn-submit-search" class="btn btn-search">🔍 Wachen laden</button>
+
+                        <div style="margin-left: auto; display: flex; align-items: center; gap: 10px;">
+                            <label style="cursor: pointer; font-size: 0.9em; color: #ffc107;" title="Öffne F12 Konsole für Details!">
+                                <input type="checkbox" id="chk-debug" checked> <b>Debug (Nur Loggen)</b>
+                            </label>
+                            <button id="btn-gnadenlos" class="btn" style="background: #dc3545; border-color: #dc3545; font-weight: bold;">🔥 Gnadenlos Bauen</button>
+                        </div>
+                    </div>
+                    <div id="wachen-target" class="wachen-container">
+                        <div class="loading">Bitte Filter wählen und auf "Wachen laden" klicken.</div>
                     </div>
                 </div>
-                <div id="wachen-target" class="wachen-container">
-                    <div class="loading">Bitte Filter wählen und auf "Wachen laden" klicken.</div>
+
+                <div id="tab-settings" class="tab-panel">
+                    <div class="settings-toolbar">
+                        <div id="lst-load-status" class="settings-hint">Lade Leitstellen aus dem Spiel...</div>
+                    </div>
+                    <div class="settings-wrap">
+                        <div class="settings-intro">
+                            Welcher Wachentyp soll im Gnadenlos-Modus welcher Leitstelle zugeordnet werden? Ohne Typ-Zuweisung greift der Fallback.
+                        </div>
+                        <table class="settings-table">
+                            <thead>
+                                <tr>
+                                    <th>Wachentyp</th>
+                                    <th>Leitstelle</th>
+                                </tr>
+                            </thead>
+                            <tbody id="lst-assign-rows"></tbody>
+                        </table>
+                        <div class="settings-fallback">
+                            <label for="sel-lst-fallback">Fallback-Leitstelle (für nicht zugewiesene Typen)</label>
+                            <select id="sel-lst-fallback"></select>
+                        </div>
+                    </div>
+                    <div class="settings-actions">
+                        <button type="button" id="btn-save-lst" class="btn btn-search">💾 Speichern</button>
+                        <button type="button" id="btn-reset-lst" class="btn">Auf Vorschläge zurücksetzen</button>
+                        <button type="button" id="btn-reload-lst" class="btn">🔄 Leitstellen neu laden</button>
+                        <span id="lst-save-hint" class="settings-hint"></span>
+                    </div>
                 </div>
             `;
             document.body.appendChild(view);
+        }
+
+        function buildLstOptionsHtml(selectedId) {
+            let html = `<option value="">— keine —</option>`;
+            leitstellen.forEach(l => {
+                const sel = (selectedId != null && String(selectedId) === String(l.id)) ? ' selected' : '';
+                html += `<option value="${l.id}"${sel}>${l.caption} (ID ${l.id})</option>`;
+            });
+            return html;
+        }
+
+        function renderSettingsPanel() {
+            const tbody = document.getElementById('lst-assign-rows');
+            const fallbackSel = document.getElementById('sel-lst-fallback');
+            const loadStatus = document.getElementById('lst-load-status');
+            if (!tbody || !fallbackSel) return;
+
+            if (loadStatus) {
+                if (!leitstellen.length) {
+                    loadStatus.textContent = 'Keine Leitstellen geladen. Spiel-Tab offen lassen und „Leitstellen neu laden“ klicken.';
+                    loadStatus.style.color = '#dc3545';
+                } else {
+                    loadStatus.textContent = `${leitstellen.length} Leitstelle(n) verfügbar.`;
+                    loadStatus.style.color = '#28a745';
+                }
+            }
+
+            tbody.innerHTML = '';
+            Object.keys(BUILDING_TYPE_LABELS).forEach(typeId => {
+                const tr = document.createElement('tr');
+                const current = lstAssignments[typeId] != null ? lstAssignments[typeId] : '';
+                tr.innerHTML = `
+                    <td><strong>${BUILDING_TYPE_LABELS[typeId]}</strong> <span style="color:#888;font-size:0.85em;">(Typ ${typeId})</span></td>
+                    <td><select data-type="${typeId}" class="lst-type-select">${buildLstOptionsHtml(current)}</select></td>
+                `;
+                tbody.appendChild(tr);
+            });
+
+            fallbackSel.innerHTML = buildLstOptionsHtml(lstAssignments.fallback);
+            updateLstStatus();
+        }
+
+        function applyPlayerBuildings(buildings, sourceLabel) {
+            if (!Array.isArray(buildings)) {
+                console.error(`${projectName}: buildings ist kein Array (${sourceLabel})`, buildings);
+                return false;
+            }
+            playerWachen = buildings;
+            leitstellen = playerWachen
+                .filter(w => Number(w.building_type) === 7)
+                .map(w => ({ id: w.id, caption: w.caption || `Leitstelle ${w.id}` }))
+                .sort((a, b) => a.caption.localeCompare(b.caption, 'de'));
+
+            console.log(`${projectName}: ${playerWachen.length} Wachen via ${sourceLabel}, davon ${leitstellen.length} Leitstellen.`);
+            ensureAssignmentsSeeded();
+            renderSettingsPanel();
+            if (serverWachenResult.length > 0) renderList();
+            return true;
+        }
+
+        function loadBuildingsFromCache() {
+            try {
+                const raw = GM_getValue(buildingsCacheKey, '');
+                if (!raw) return false;
+                const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+                const buildings = parsed.buildings || parsed;
+                return applyPlayerBuildings(buildings, 'GM-Cache');
+            } catch (err) {
+                console.error(`${projectName}: Cache lesen fehlgeschlagen`, err);
+                return false;
+            }
+        }
+
+        function requestBuildingsSync() {
+            // Fordert das Spielfenster an, Gebäude same-origin zu laden und in den Cache zu schreiben
+            GM_setValue(commandChannel, JSON.stringify({
+                action: 'sync_buildings',
+                ts: Date.now()
+            }));
+            const loadStatus = document.getElementById('lst-load-status');
+            if (loadStatus && !leitstellen.length) {
+                loadStatus.textContent = 'Warte auf Sync aus dem Spiel-Tab...';
+                loadStatus.style.color = '#f0ad4e';
+            }
+        }
+
+        function loadBuildingsFallbackXhr() {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: 'https://www.leitstellenspiel.de/api/buildings',
+                anonymous: false,
+                onload: (res) => {
+                    try {
+                        if (res.status !== 200) {
+                            console.error(`${projectName}: LSS API HTTP ${res.status}`, res.responseText?.slice?.(0, 200));
+                            renderSettingsPanel();
+                            return;
+                        }
+                        const data = JSON.parse(res.responseText);
+                        applyPlayerBuildings(data, 'GM_xhr Fallback');
+                    } catch (err) {
+                        console.error('Konnte LSS-Wachen nicht lesen', err);
+                        renderSettingsPanel();
+                    }
+                },
+                onerror: (err) => {
+                    console.error(`${projectName}: LSS API Netzwerkfehler`, err);
+                    renderSettingsPanel();
+                }
+            });
+        }
+
+        function suggestDefaultAssignments() {
+            // Heuristik aus Leitstellennamen (nur als Vorschlag, nicht mehr hardcodiert im Bau)
+            let bau = null, thw = null, bpol = null;
+            leitstellen.forEach(w => {
+                const n = (w.caption || '').toLowerCase();
+                if (n.includes('thw') && n.includes('bau')) thw = w.id;
+                else if ((n.includes('bpol') || n.includes('bepol') || n.includes('bereitschafts')) && n.includes('bau')) bpol = w.id;
+                else if (n.includes('bau') && !n.includes('thw') && !n.includes('bpol') && !n.includes('bepol')) {
+                    if (!bau) bau = w.id;
+                }
+            });
+            if (!bau && leitstellen.length === 1) bau = leitstellen[0].id;
+
+            const next = { fallback: bau };
+            Object.keys(BUILDING_TYPE_LABELS).forEach(typeId => {
+                const t = Number(typeId);
+                if (t === 9) next[typeId] = thw || bau;
+                else if (t === 11) next[typeId] = bpol || bau;
+                else next[typeId] = bau;
+            });
+            return next;
+        }
+
+        function ensureAssignmentsSeeded() {
+            const hasAny = Object.keys(lstAssignments).some(k => k !== 'fallback' && lstAssignments[k] != null && lstAssignments[k] !== '');
+            const hasFallback = lstAssignments.fallback != null && lstAssignments.fallback !== '';
+            if (!hasAny && !hasFallback && leitstellen.length > 0) {
+                lstAssignments = suggestDefaultAssignments();
+                saveLstAssignments();
+            }
         }
 
         // --- DIE ABGESICHERTE API ANFRAGE (mit echtem Fehler-Handling) ---
@@ -533,6 +826,74 @@
         function init() {
             createUI();
             loadFilters();
+            updateLstStatus();
+
+            // Tabs
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const tab = btn.dataset.tab;
+                    document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+                    document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === `tab-${tab}`));
+                    if (tab === 'settings') renderSettingsPanel();
+                });
+            });
+
+            document.getElementById('btn-save-lst').addEventListener('click', () => {
+                const next = { fallback: null };
+                document.querySelectorAll('.lst-type-select').forEach(sel => {
+                    next[sel.dataset.type] = sel.value === '' ? null : Number(sel.value);
+                });
+                const fb = document.getElementById('sel-lst-fallback').value;
+                next.fallback = fb === '' ? null : Number(fb);
+                lstAssignments = next;
+                saveLstAssignments();
+                const hint = document.getElementById('lst-save-hint');
+                if (hint) {
+                    hint.textContent = 'Gespeichert.';
+                    hint.style.color = '#28a745';
+                    setTimeout(() => { hint.textContent = ''; }, 2500);
+                }
+            });
+
+            document.getElementById('btn-reset-lst').addEventListener('click', () => {
+                if (!leitstellen.length) {
+                    alert('Noch keine Leitstellen geladen. Bitte Spiel-Tab offen lassen und „Leitstellen neu laden“ klicken.');
+                    return;
+                }
+                if (!confirm('Zuweisungen auf Namens-Vorschläge (Bau / Bau THW / Bau BPOL) zurücksetzen?')) return;
+                lstAssignments = suggestDefaultAssignments();
+                saveLstAssignments();
+                renderSettingsPanel();
+                const hint = document.getElementById('lst-save-hint');
+                if (hint) {
+                    hint.textContent = 'Vorschläge übernommen – speichern nicht nötig (bereits gespeichert).';
+                    hint.style.color = '#28a745';
+                }
+            });
+
+            document.getElementById('btn-reload-lst').addEventListener('click', () => {
+                const loadStatus = document.getElementById('lst-load-status');
+                if (loadStatus) {
+                    loadStatus.textContent = 'Lade Leitstellen...';
+                    loadStatus.style.color = '#f0ad4e';
+                }
+                requestBuildingsSync();
+                // Kurz warten, dann Cache + Fallback prüfen
+                setTimeout(() => {
+                    if (!loadBuildingsFromCache()) loadBuildingsFallbackXhr();
+                }, 800);
+            });
+
+            // Cache-Updates aus dem Spiel-Tab übernehmen
+            GM_addValueChangeListener(buildingsCacheKey, (name, old_val, new_val, remote) => {
+                if (!new_val) return;
+                try {
+                    const parsed = typeof new_val === 'string' ? JSON.parse(new_val) : new_val;
+                    applyPlayerBuildings(parsed.buildings || parsed, remote ? 'Spiel-Sync' : 'lokaler Cache');
+                } catch (err) {
+                    console.error(`${projectName}: Cache-Update ungültig`, err);
+                }
+            });
 
             GM_addValueChangeListener(progressChannel, (name, old_val, new_val, remote) => {
                 if (!new_val) return;
@@ -618,16 +979,16 @@
                 }
 
                 const payload = missingWachen.map(w => {
-                    let gameType = getGameTypeId(w);
-                    let targetLst = lstMap.bau;
-                    let lstReason = "Fallback Leitstelle Bau";
-
-                    if (gameType === 9) {
-                        targetLst = lstMap.thw || lstMap.bau;
-                        lstReason = lstMap.thw ? "Leitstelle Bau THW" : "Fallback Bau (THW LST fehlt)";
-                    } else if (gameType === 11) {
-                        targetLst = lstMap.bpol || lstMap.bau;
-                        lstReason = lstMap.bpol ? "Leitstelle Bau BPOL" : "Fallback Bau (BPOL LST fehlt)";
+                    const gameType = getGameTypeId(w);
+                    const targetLst = getLstForType(gameType);
+                    const typeLabel = BUILDING_TYPE_LABELS[gameType] || `Typ ${gameType}`;
+                    let lstReason;
+                    if (lstAssignments[String(gameType)] != null && lstAssignments[String(gameType)] !== '') {
+                        lstReason = `Einstellungen: ${typeLabel} → ${getLstName(targetLst)}`;
+                    } else if (targetLst != null) {
+                        lstReason = `Fallback → ${getLstName(targetLst)}`;
+                    } else {
+                        lstReason = 'Keine Leitstelle zugewiesen';
                     }
 
                     let startVeh = null;
@@ -647,40 +1008,15 @@
                 GM_setValue(commandChannel, JSON.stringify({ action: 'gnadenlos_batch', buildings: payload, debug: isDebug }));
             });
 
-            // LSS-Wachen laden & Leitstellen identifizieren
-            GM_xmlhttpRequest({
-                method: "GET",
-                url: "https://www.leitstellenspiel.de/api/buildings",
-                onload: (res) => {
-                    try {
-                        playerWachen = JSON.parse(res.responseText);
-                        console.log(`${projectName}: LSS-Wachen geladen.`);
-
-                        playerWachen.forEach(w => {
-                            if (w.building_type === 7) {
-                                const n = (w.caption || '').toLowerCase();
-                                if (n.includes("thw") && n.includes("bau")) {
-                                    lstMap.thw = w.id;
-                                } else if ((n.includes("bpol") || n.includes("bepol") || n.includes("bereitschafts")) && n.includes("bau")) {
-                                    lstMap.bpol = w.id;
-                                } else if (n.includes("bau")) {
-                                    if (!n.includes("thw") && !n.includes("bpol") && !n.includes("bepol")) {
-                                        lstMap.bau = w.id;
-                                    }
-                                }
-                            }
-                        });
-                        const lstUI = document.getElementById('lst-status');
-                        lstUI.textContent = `LST gefunden: Bau(${lstMap.bau || '✖'}) THW(${lstMap.thw || '✖'}) BPOL(${lstMap.bpol || '✖'})`;
-                        lstUI.title = `IDs:\nBau: ${lstMap.bau}\nTHW: ${lstMap.thw}\nBPOL: ${lstMap.bpol}`;
-                        lstUI.style.color = lstMap.bau ? '#28a745' : '#dc3545';
-                        console.log("Erkannte Bau-Leitstellen:", lstMap);
-                        if (serverWachenResult.length > 0) renderList();
-                    } catch(err) {
-                        console.error("Konnte LSS-Wachen nicht lesen", err);
-                    }
-                }
-            });
+            // Gebäude: zuerst Cache vom Spiel-Tab, sonst Sync anfordern, sonst XHR-Fallback
+            renderSettingsPanel();
+            const hadCache = loadBuildingsFromCache();
+            requestBuildingsSync();
+            if (!hadCache) {
+                setTimeout(() => {
+                    if (!leitstellen.length) loadBuildingsFallbackXhr();
+                }, 1500);
+            }
         }
         if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
         else init();
