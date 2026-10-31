@@ -8,13 +8,6 @@
 // @match        https://leitstellenspiel.de/*
 // @match        https://www.leitstellenspiel.de/tfn/*
 // @match        https://leitstellenspiel.de/tfn/*
-// @match        https://www.leitstellenspiel.de/fr-manager
-// @match        https://leitstellenspiel.de/fr-manager
-// @match        https://www.leitstellenspiel.de/verband/manager
-// @match        https://leitstellenspiel.de/verband/manager
-// @match        https://tfn.tw/0
-// @match        https://leitstellenspiel.de/rgbl_by_tfn
-// @match        https://www.leitstellenspiel.de/rgbl_by_tfn
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
