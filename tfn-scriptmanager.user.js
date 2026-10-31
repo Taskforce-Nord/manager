@@ -1,13 +1,12 @@
 // ==UserScript==
 // @name         TFN-Scriptmanager
 // @namespace    https://tfn.tw/manager
-// @version      1.3.9
+// @version      1.3.11
 // @description  Bootstrap: Session→Katalog→Enable→Fetch+Eval (RAM). UI wie V27.5 inkl. HTML-Anleitungen und Multi-Kategorie-Tabs. Kein GitHub/PAT.
 // @author       Masklin
 // @match        https://www.leitstellenspiel.de/*
 // @match        https://leitstellenspiel.de/*
-// @match        https://www.leitstellenspiel.de/tfn/*
-// @match        https://leitstellenspiel.de/tfn/*
+// @match        https://tfn.tw/0
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -16,13 +15,13 @@
 // @grant        GM_addStyle
 // @grant        GM_addValueChangeListener
 // @connect      tfn.tw
-// @run-at       document-idle
+// @run-at       document-start
 // ==/UserScript==
 
 (function () {
   'use strict';
 
-  const MANAGER_VERSION = '1.3.9';
+  const MANAGER_VERSION = '1.3.11';
   const API_BASE = 'https://tfn.tw/manager';
   const API_USE_QUERY_FALLBACK = false; // true → …/index.php?r=api/…
   const DB_NAME = 'BM-DB-TN-v2';
@@ -33,6 +32,70 @@
   /** localStorage-Keys die Kill/Session betreffen (Seite) */
   const LS_KILL_KEYS = ['bm_killed', 'bm_session_token', 'bm_user_id'];
   const HEARTBEAT_MS = 60000;
+
+  /**
+   * Seiten ohne LSS-user_id → Session-Host (Tool-Popups).
+   * Früh definiert, damit document-start die 404-Shell vor dem Paint stoppen kann.
+   */
+  function isSessionHostPage() {
+    try {
+      const host = location.hostname || '';
+      const path = location.pathname || '';
+      if (/(?:^|\.)tfn\.tw$/i.test(host)) return true;
+      if (/\/rgbl_by_tfn\/?$/i.test(path)) return true;
+      if (!/leitstellenspiel\.de$/i.test(host)) return false;
+      if (/^\/tfn\//i.test(path)) return true;
+      if (/\/fr-manager\/?$/i.test(path)) return true;
+      if (/\/verband\/manager\/?$/i.test(path)) return true;
+    } catch (_) {}
+    return false;
+  }
+
+  /** @deprecated alias */
+  function isListHostPage() {
+    return isSessionHostPage();
+  }
+
+  /** LSS-404 auf /tfn/* (etc.) vor Paint ausblenden */
+  function suppressSessionHostFlash() {
+    try { window.stop(); } catch (_) {}
+    try {
+      window.__TFN_HOST_SUPPRESSED__ = true;
+      if (typeof unsafeWindow !== 'undefined') unsafeWindow.__TFN_HOST_SUPPRESSED__ = true;
+    } catch (_) {}
+    try {
+      const html = document.documentElement;
+      if (!html) return;
+      html.innerHTML =
+        '<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
+        '<title>TFN</title>' +
+        '<style>html,body{margin:0;background:#1a1a1a;color:#777;height:100%;font:14px/1.45 system-ui,Segoe UI,sans-serif}' +
+        '#tfn-host-veil{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;' +
+        'background:#1a1a1a;z-index:2147483647;letter-spacing:0.02em}</style></head>' +
+        '<body><div id="tfn-host-veil">TFN lädt…</div></body>';
+    } catch (e) {
+      try {
+        const st = document.createElement('style');
+        st.id = 'tfn-host-blank-css';
+        st.textContent = 'html,body{background:#1a1a1a!important}body>*{visibility:hidden!important}#tfn-host-veil{visibility:visible!important;position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#1a1a1a;z-index:2147483647;color:#777}';
+        (document.documentElement || document).appendChild(st);
+      } catch (_) {}
+    }
+  }
+
+  function setHostVeilMessage(msg) {
+    try {
+      const v = document.getElementById('tfn-host-veil');
+      if (v) v.textContent = String(msg || 'TFN lädt…');
+    } catch (_) {}
+  }
+
+  function clearHostVeil() {
+    try {
+      const v = document.getElementById('tfn-host-veil');
+      if (v) v.remove();
+    } catch (_) {}
+  }
   const MANAGER_MANUAL_HTML = `
 <div class="bm-manual-scope" style="font-family:Segoe UI,sans-serif;color:#222;line-height:1.55;padding:16px;">
   <h1 style="color:#0d6efd;border-bottom:2px solid #0d6efd;padding-bottom:8px;">TFN-Scriptmanager</h1>
@@ -486,29 +549,6 @@
     } catch (e) {
       console.warn('[TFN] GM-Bridge fehlgeschlagen', e);
     }
-  }
-
-  /**
-   * Seiten ohne LSS-user_id, auf denen der Manager trotzdem Scripts ausliefern muss.
-   * Kanonisch: LSS `/tfn/<tool>` (404-Shell). Legacy: /fr-manager, /verband/manager, tfn.tw/0, /rgbl_by_tfn.
-   */
-  function isSessionHostPage() {
-    try {
-      const host = location.hostname || '';
-      const path = location.pathname || '';
-      if (/(?:^|\.)tfn\.tw$/i.test(host)) return true;
-      if (/\/rgbl_by_tfn\/?$/i.test(path)) return true;
-      if (!/leitstellenspiel\.de$/i.test(host)) return false;
-      if (/^\/tfn\//i.test(path)) return true;
-      if (/\/fr-manager\/?$/i.test(path)) return true;
-      if (/\/verband\/manager\/?$/i.test(path)) return true;
-    } catch (_) {}
-    return false;
-  }
-
-  /** @deprecated alias */
-  function isListHostPage() {
-    return isSessionHostPage();
   }
 
   /** Host-Seiten: diese Slugs ggf. forcen, falls Prefs leer / from-scratch */
@@ -1284,6 +1324,7 @@
       bootStatus = 'error';
       bootMessage = 'Host-Seite ohne Session. Bitte zuerst normales LSS mit TFN-Scriptmanager öffnen (Session anlegen), dann diesen Tab neu laden.';
       console.warn('[TFN]', bootMessage);
+      setHostVeilMessage(bootMessage);
       return;
     }
 
@@ -1309,6 +1350,7 @@
       bootStatus = 'error';
       bootMessage = 'Katalog auf Host-Seite fehlgeschlagen. ' + formatApiError(e);
       console.warn('[TFN]', bootMessage, e);
+      setHostVeilMessage(bootMessage);
       return;
     }
 
@@ -1317,7 +1359,7 @@
     ensurePrefsForCatalog();
 
     // Host-Scripts: wenn URL matcht und Pref noch aus/fehlend → aktivieren
-    // (sonst bleibt /fr-manager leer, obwohl Katalog den Eintrag hat).
+    // (sonst bleibt /tfn/… leer, obwohl Katalog den Eintrag hat).
     for (const s of catalog) {
       const sid = Number(s.id);
       const slug = String(s.slug || '');
@@ -1337,7 +1379,9 @@
 
     bootStatus = 'ok';
     bootMessage = '';
+    setHostVeilMessage('TFN startet Script…');
     await fetchAndRunEnabled();
+    clearHostVeil();
     console.log('[TFN] Host-Seite bereit ·', location.pathname, '· v' + MANAGER_VERSION,
       '· aktiv', prefs.filter((p) => p.enabled).length);
   }
@@ -1469,22 +1513,43 @@
       wasKilled ? '· nach-Kill-Recovery' : '');
   }
 
-  function startWhenReady() {
-    const run = () => { boot().catch(console.error); };
-    if (document.body) run();
-    else {
+  /** Normales LSS: document-start → auf user_id warten, dann boot */
+  function startNormalBoot() {
+    const tryBoot = () => {
+      const u = readPageUser();
+      if (u.user_id) {
+        boot().catch(console.error);
+        return true;
+      }
+      return false;
+    };
+    const poll = () => {
+      if (tryBoot()) return;
+      let n = 0;
       const iv = setInterval(() => {
-        if (document.body) {
+        if (tryBoot() || ++n >= 120) {
           clearInterval(iv);
-          run();
+          if (n >= 120) boot().catch(console.error);
         }
       }, 50);
+    };
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', poll);
+    } else {
+      poll();
     }
   }
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', startWhenReady);
+  // document-start: Session-Host sofort stoppen/blanken (kein 404-Flash), sonst normales Boot
+  if (isSessionHostPage()) {
+    suppressSessionHostFlash();
+    Promise.resolve()
+      .then(() => bootListHost())
+      .catch((e) => {
+        console.error('[TFN] Host-Boot fehlgeschlagen', e);
+        setHostVeilMessage('TFN Host-Boot fehlgeschlagen.');
+      });
   } else {
-    startWhenReady();
+    startNormalBoot();
   }
 })();
