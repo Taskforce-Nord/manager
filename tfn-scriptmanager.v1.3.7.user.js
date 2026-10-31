@@ -1,13 +1,17 @@
 // ==UserScript==
 // @name         TFN-Scriptmanager
 // @namespace    https://tfn.tw/manager
-// @version      1.3.7
+// @version      1.3.9
 // @description  Bootstrap: Session→Katalog→Enable→Fetch+Eval (RAM). UI wie V27.5 inkl. HTML-Anleitungen und Multi-Kategorie-Tabs. Kein GitHub/PAT.
-// @author       TFN / Jörg Leidig
+// @author       Masklin
 // @match        https://www.leitstellenspiel.de/*
 // @match        https://leitstellenspiel.de/*
+// @match        https://www.leitstellenspiel.de/tfn/*
+// @match        https://leitstellenspiel.de/tfn/*
 // @match        https://www.leitstellenspiel.de/fr-manager
 // @match        https://leitstellenspiel.de/fr-manager
+// @match        https://www.leitstellenspiel.de/verband/manager
+// @match        https://leitstellenspiel.de/verband/manager
 // @match        https://tfn.tw/0
 // @match        https://leitstellenspiel.de/rgbl_by_tfn
 // @match        https://www.leitstellenspiel.de/rgbl_by_tfn
@@ -25,7 +29,7 @@
 (function () {
   'use strict';
 
-  const MANAGER_VERSION = '1.3.7';
+  const MANAGER_VERSION = '1.3.9';
   const API_BASE = 'https://tfn.tw/manager';
   const API_USE_QUERY_FALLBACK = false; // true → …/index.php?r=api/…
   const DB_NAME = 'BM-DB-TN-v2';
@@ -46,7 +50,7 @@
     <li><strong>Änderungen anwenden</strong> oder Manager schließen speichert Enables (lokal + optional Sync).</li>
     <li>📖 auf der Kachel öffnet die Script-Anleitung (wenn hinterlegt).</li>
   </ol>
-  <p class="note" style="background:#fff8e6;border-left:4px solid #f0ad4e;padding:10px;">Host-Seiten ohne user_id (<code>/fr-manager</code>, <code>tfn.tw/0</code>) booten per GM-Session – zuerst normales LSS öffnen.</p>
+  <p class="note" style="background:#fff8e6;border-left:4px solid #f0ad4e;padding:10px;">Tool-Popups unter <code>/tfn/…</code> (und Legacy <code>/fr-manager</code>, <code>tfn.tw/0</code>, …) booten per GM-Session – zuerst normales LSS öffnen.</p>
 </div>`;
 
   /** @type {IDBDatabase|null} */
@@ -492,8 +496,8 @@
   }
 
   /**
-   * Seiten ohne LSS-user_id, auf denen der Manager trotzdem Scripts ausliefern muss
-   * (Gebäudeliste tfn.tw/0, FR Pro² /fr-manager = LSS-404-Shell).
+   * Seiten ohne LSS-user_id, auf denen der Manager trotzdem Scripts ausliefern muss.
+   * Kanonisch: LSS `/tfn/<tool>` (404-Shell). Legacy: /fr-manager, /verband/manager, tfn.tw/0, /rgbl_by_tfn.
    */
   function isSessionHostPage() {
     try {
@@ -501,7 +505,10 @@
       const path = location.pathname || '';
       if (/(?:^|\.)tfn\.tw$/i.test(host)) return true;
       if (/\/rgbl_by_tfn\/?$/i.test(path)) return true;
-      if (/\/fr-manager\/?$/i.test(path) && /leitstellenspiel\.de$/i.test(host)) return true;
+      if (!/leitstellenspiel\.de$/i.test(host)) return false;
+      if (/^\/tfn\//i.test(path)) return true;
+      if (/\/fr-manager\/?$/i.test(path)) return true;
+      if (/\/verband\/manager\/?$/i.test(path)) return true;
     } catch (_) {}
     return false;
   }
@@ -512,7 +519,7 @@
   }
 
   /** Host-Seiten: diese Slugs ggf. forcen, falls Prefs leer / from-scratch */
-  const HOST_AUTO_ENABLE_SLUGS = ['reale-gebaeudeliste', 'lss-fr-pro'];
+  const HOST_AUTO_ENABLE_SLUGS = ['reale-gebaeudeliste', 'lss-fr-pro', 'verbands-gebaeude-manager'];
 
   /**
    * Im Seitenkontext ausführen (wie @grant none). Sandbox-new Function
@@ -1263,7 +1270,7 @@
   }
 
   /**
-   * Host ohne LSS-user_id (tfn.tw/0, /fr-manager, …):
+   * Host ohne LSS-user_id (/tfn/*, Legacy fr-manager / verband/manager / tfn.tw/0, …):
    * Session aus GM/Hash → Katalog → matching Scripts (GM-Bridge + Eval).
    */
   async function bootListHost() {
