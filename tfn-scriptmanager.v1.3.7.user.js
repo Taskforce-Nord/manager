@@ -1,0 +1,1490 @@
+// ==UserScript==
+// @name         TFN-Scriptmanager
+// @namespace    https://tfn.tw/manager
+// @version      1.3.7
+// @description  Bootstrap: Session→Katalog→Enable→Fetch+Eval (RAM). UI wie V27.5 inkl. HTML-Anleitungen und Multi-Kategorie-Tabs. Kein GitHub/PAT.
+// @author       TFN / Jörg Leidig
+// @match        https://www.leitstellenspiel.de/*
+// @match        https://leitstellenspiel.de/*
+// @match        https://www.leitstellenspiel.de/fr-manager
+// @match        https://leitstellenspiel.de/fr-manager
+// @match        https://tfn.tw/0
+// @match        https://leitstellenspiel.de/rgbl_by_tfn
+// @match        https://www.leitstellenspiel.de/rgbl_by_tfn
+// @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_listValues
+// @grant        GM_addStyle
+// @grant        GM_addValueChangeListener
+// @connect      tfn.tw
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const MANAGER_VERSION = '1.3.7';
+  const API_BASE = 'https://tfn.tw/manager';
+  const API_USE_QUERY_FALLBACK = false; // true → …/index.php?r=api/…
+  const DB_NAME = 'BM-DB-TN-v2';
+  const DB_VERSION = 1;
+  const GM_SYNC_KEY = 'bm_sync_enabled';
+  const GM_SESSION_KEY = 'bm_session_token';
+  const GM_KILLED_KEY = 'bm_client_killed';
+  /** localStorage-Keys die Kill/Session betreffen (Seite) */
+  const LS_KILL_KEYS = ['bm_killed', 'bm_session_token', 'bm_user_id'];
+  const HEARTBEAT_MS = 60000;
+  const MANAGER_MANUAL_HTML = `
+<div class="bm-manual-scope" style="font-family:Segoe UI,sans-serif;color:#222;line-height:1.55;padding:16px;">
+  <h1 style="color:#0d6efd;border-bottom:2px solid #0d6efd;padding-bottom:8px;">TFN-Scriptmanager</h1>
+  <p>Scripts kommen vom Server <code>tfn.tw/manager</code> (Session + Stufe). Kein GitHub/PAT.</p>
+  <h2 style="color:#0b5ed7;">Bedienung</h2>
+  <ol>
+    <li>Kachel anklicken = gewählt (blau).</li>
+    <li><strong>Änderungen anwenden</strong> oder Manager schließen speichert Enables (lokal + optional Sync).</li>
+    <li>📖 auf der Kachel öffnet die Script-Anleitung (wenn hinterlegt).</li>
+  </ol>
+  <p class="note" style="background:#fff8e6;border-left:4px solid #f0ad4e;padding:10px;">Host-Seiten ohne user_id (<code>/fr-manager</code>, <code>tfn.tw/0</code>) booten per GM-Session – zuerst normales LSS öffnen.</p>
+</div>`;
+
+  /** @type {IDBDatabase|null} */
+  let db = null;
+  /** @type {Map<number, string>} */
+  const codeRam = new Map();
+  /** @type {Array<object>} */
+  let catalog = [];
+  /** @type {{scriptId:number, enabled:boolean, config:object}[]} */
+  let prefs = [];
+  /** Draft-Enable vor „Änderungen anwenden“ (scriptId → bool) */
+  let draftEnabled = {};
+  let sessionToken = null;
+  let permissionLevel = 0;
+  let syncEnabled = GM_getValue(GM_SYNC_KEY, true);
+  let heartbeatTimer = null;
+  let killed = false;
+  let managerUiCreated = false;
+  let bootStatus = 'starting'; // starting|ok|offline|maintenance|off|error
+  let bootMessage = '';
+  let filterText = '';
+  /** Nach Kill-Wipe: Banner + Server-Prefs-Restore */
+  let recoveredFromKill = false;
+  let recoveryNote = '';
+  /** @type {{id:number,slug:string,title:string,sort_order:number}[]} */
+  let categories = [];
+  let activeCategoryTab = 'Alle';
+
+  // -------------------------------------------------------------------------
+  // Page identity
+  // -------------------------------------------------------------------------
+  function readPageUser() {
+    let uid = null;
+    let name = null;
+    const pickName = (v) => {
+      if (v == null) return;
+      const s = String(v).trim();
+      if (s) name = s;
+    };
+    try {
+      if (typeof unsafeWindow !== 'undefined') {
+        if (typeof unsafeWindow.user_id !== 'undefined') uid = unsafeWindow.user_id;
+        if (typeof unsafeWindow.username !== 'undefined') pickName(unsafeWindow.username);
+        if (!name && typeof unsafeWindow.user_name !== 'undefined') pickName(unsafeWindow.user_name);
+      }
+    } catch (_) {}
+    try {
+      if (uid == null && typeof user_id !== 'undefined') uid = user_id;
+      if (!name && typeof username !== 'undefined') pickName(username);
+      if (!name && typeof user_name !== 'undefined') pickName(user_name);
+    } catch (_) {}
+    if (uid == null) {
+      const el = document.querySelector('[data-user-id], #user_id');
+      if (el) uid = el.getAttribute('data-user-id') || el.textContent;
+    }
+    if (!name) {
+      const profile =
+        document.querySelector('#navbar_profile_link, a[href*="/profile/"] .navbar-username, .navbar-user-name, #profile_name');
+      if (profile) pickName(profile.textContent);
+    }
+    if (!name) {
+      try {
+        const cached = GM_getValue('bm_last_display_name', '');
+        if (cached) pickName(cached);
+      } catch (_) {}
+    }
+    const userId = parseInt(String(uid), 10);
+    const displayName = name ? String(name).slice(0, 128) : null;
+    return {
+      user_id: Number.isFinite(userId) && userId > 0 ? userId : null,
+      display_name: displayName,
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // IndexedDB – nur prefs (enable + config), KEIN Quellcode
+  // -------------------------------------------------------------------------
+  function openDb() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = (ev) => {
+        const database = ev.target.result;
+        if (!database.objectStoreNames.contains('prefs')) {
+          database.createObjectStore('prefs', { keyPath: 'scriptId' });
+        }
+      };
+      req.onsuccess = (ev) => {
+        db = ev.target.result;
+        resolve(db);
+      };
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  function idbAllPrefs() {
+    return new Promise((resolve, reject) => {
+      if (!db) return resolve([]);
+      const tx = db.transaction('prefs', 'readonly');
+      const r = tx.objectStore('prefs').getAll();
+      r.onsuccess = () => resolve(r.result || []);
+      r.onerror = () => reject(r.error);
+    });
+  }
+
+  function idbPutPref(pref) {
+    return new Promise((resolve, reject) => {
+      if (!db) return resolve();
+      const tx = db.transaction('prefs', 'readwrite');
+      tx.objectStore('prefs').put({
+        scriptId: pref.scriptId,
+        enabled: !!pref.enabled,
+        config: pref.config && typeof pref.config === 'object' ? pref.config : {},
+      });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  function idbClearAll() {
+    return new Promise((resolve) => {
+      const finish = () => {
+        try {
+          const keys = GM_listValues();
+          keys.forEach((k) => GM_deleteValue(k));
+        } catch (_) {}
+        resolve();
+      };
+      if (!db) {
+        const del = indexedDB.deleteDatabase(DB_NAME);
+        del.onsuccess = finish;
+        del.onerror = finish;
+        del.onblocked = finish;
+        return;
+      }
+      try { db.close(); } catch (_) {}
+      db = null;
+      const del = indexedDB.deleteDatabase(DB_NAME);
+      del.onsuccess = finish;
+      del.onerror = finish;
+      del.onblocked = finish;
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // HTTP
+  // -------------------------------------------------------------------------
+  function apiUrl(path) {
+    const p = path.startsWith('/') ? path : '/' + path;
+    if (API_USE_QUERY_FALLBACK) {
+      return API_BASE + '/index.php?r=' + encodeURIComponent(p.replace(/^\//, ''));
+    }
+    return API_BASE + p;
+  }
+
+  function api(method, path, body) {
+    return new Promise((resolve, reject) => {
+      const headers = { 'Content-Type': 'application/json' };
+      if (sessionToken) {
+        headers['Authorization'] = 'Bearer ' + sessionToken;
+        headers['X-BM-Session'] = sessionToken;
+      }
+      GM_xmlhttpRequest({
+        method,
+        url: apiUrl(path),
+        headers,
+        data: body != null ? JSON.stringify(body) : undefined,
+        timeout: 20000,
+        onload: (res) => {
+          let data = null;
+          try { data = JSON.parse(res.responseText); } catch (_) {}
+          if (res.status >= 200 && res.status < 300) {
+            resolve(data || {});
+          } else {
+            const err = new Error((data && data.message) || ('HTTP ' + res.status));
+            err.status = res.status;
+            err.payload = data;
+            err.kind = 'http';
+            reject(err);
+          }
+        },
+        onerror: () => {
+          const err = new Error('network_error');
+          err.kind = 'network';
+          reject(err);
+        },
+        ontimeout: () => {
+          const err = new Error('timeout');
+          err.kind = 'network';
+          reject(err);
+        },
+      });
+    });
+  }
+
+  function formatApiError(e) {
+    if (!e) return 'Unbekannter Fehler';
+    if (e.kind === 'network' || e.message === 'network_error' || e.message === 'timeout') {
+      return 'Server nicht erreichbar (Netzwerk/@connect). Es werden keine Scripts ausgeführt.';
+    }
+    const msg = (e.payload && e.payload.message) || e.message || 'Fehler';
+    const code = (e.payload && e.payload.error) || ('HTTP ' + (e.status || '?'));
+    return 'API-Fehler: ' + code + ' – ' + msg;
+  }
+
+  // -------------------------------------------------------------------------
+  // Kill-Switch + From-scratch-Recovery nach Re-Freigabe
+  // -------------------------------------------------------------------------
+  /**
+   * Wo der Kill lebt:
+   * - Server: users.permission_level = −1 und/oder system_state.mode = 'kill'
+   *   (entscheidet session/start → action=kill)
+   * - Client (nur UI/Prefs wipe, blockiert Boot NICHT dauerhaft wenn Server wieder ok):
+   *   GM: bm_client_killed, bm_session_token (+ idbClearAll löscht ALLE GM_*-Keys dieses Scripts)
+   *   localStorage: bm_killed, bm_session_token, bm_user_id
+   *   IndexedDB: BM-DB-TN-v2 (ObjectStore prefs) – wird gelöscht
+   *   RAM: Variable killed
+   */
+  function clientKillFlagsPresent() {
+    let gm = false;
+    try { gm = !!GM_getValue(GM_KILLED_KEY); } catch (_) {}
+    let ls = false;
+    try { ls = localStorage.getItem('bm_killed') === '1'; } catch (_) {}
+    let ss = false;
+    try { ss = sessionStorage.getItem('bm_killed') === '1'; } catch (_) {}
+    return gm || ls || ss || killed;
+  }
+
+  function clearAllKillClientState() {
+    killed = false;
+    try { GM_deleteValue(GM_KILLED_KEY); } catch (_) {}
+    try { GM_deleteValue(GM_SESSION_KEY); } catch (_) {}
+    try {
+      LS_KILL_KEYS.forEach((k) => localStorage.removeItem(k));
+    } catch (_) {}
+    try {
+      sessionStorage.removeItem('bm_killed');
+      sessionStorage.removeItem('bm_session_token');
+    } catch (_) {}
+  }
+
+  function clearPageSessionArtifacts() {
+    try {
+      LS_KILL_KEYS.forEach((k) => localStorage.removeItem(k));
+    } catch (_) {}
+  }
+
+  async function performKill(reason) {
+    if (killed) return;
+    killed = true;
+    codeRam.clear();
+    catalog = [];
+    prefs = [];
+    draftEnabled = {};
+    sessionToken = null;
+    bootStatus = 'kill';
+    bootMessage = reason || 'gesperrt';
+    recoveredFromKill = false;
+    recoveryNote = '';
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
+    try { GM_setValue(GM_KILLED_KEY, true); } catch (_) {}
+    try { GM_deleteValue(GM_SESSION_KEY); } catch (_) {}
+    clearPageSessionArtifacts();
+    try { localStorage.setItem('bm_killed', '1'); } catch (_) {}
+    await idbClearAll();
+    // Nach idbClearAll sind GM-Values weg – Kill-Marker erneut setzen
+    try { GM_setValue(GM_KILLED_KEY, true); } catch (_) {}
+    try { localStorage.setItem('bm_killed', '1'); } catch (_) {}
+
+    const link = document.getElementById('b-m-scriptmanager-link');
+    if (link) {
+      const li = link.closest('li');
+      if (li) li.remove();
+      else link.remove();
+    }
+    const container = document.getElementById('lss-script-manager-container');
+    if (container) container.remove();
+    managerUiCreated = false;
+    console.warn('[TFN] Kill-Switch (Server sagte kill/level<0):', reason || 'gesperrt');
+  }
+
+  /**
+   * Bei JEDEM erfolgreichen session/start (action=ok, level≥0):
+   * Kill-Flags löschen (kein GM-Zugang nötig). Bei vorherigem Kill:
+   * Sync wieder an, IDB neu, Menü neu. Server-Prefs kommen danach per pull.
+   * @returns {Promise<boolean>} true wenn Kill-Flags / Wipe vorlagen
+   */
+  async function recoverFromKillIfNeeded() {
+    const wasKilled = clientKillFlagsPresent();
+    clearAllKillClientState();
+    bootStatus = 'starting';
+    bootMessage = '';
+
+    if (wasKilled) {
+      // Nach Wipe ist GM_SYNC_KEY weg – Sync wieder an, damit Server-Enables zurückkommen
+      syncEnabled = true;
+      try { GM_setValue(GM_SYNC_KEY, true); } catch (_) {}
+    } else {
+      syncEnabled = GM_getValue(GM_SYNC_KEY, true);
+    }
+
+    try {
+      if (db) {
+        try { db.close(); } catch (_) {}
+        db = null;
+      }
+      await openDb();
+      prefs = (await idbAllPrefs()).map((p) => ({
+        scriptId: Number(p.scriptId),
+        enabled: !!p.enabled,
+        config: p.config || {},
+      }));
+    } catch (e) {
+      console.warn('[TFN] DB nach Recovery:', e);
+      prefs = [];
+      try { await openDb(); } catch (_) {}
+    }
+
+    managerUiCreated = false;
+    initUIHooks();
+    if (wasKilled) {
+      console.log('[TFN] Kill-State cleared (GM/localStorage) · from-scratch · warte auf Server-Prefs');
+    }
+    return wasKilled;
+  }
+
+  // -------------------------------------------------------------------------
+  // Match + Exec (RAM) – Verhalten angelehnt an V27.5
+  // -------------------------------------------------------------------------
+  function normalizePatterns(patterns) {
+    if (patterns == null) return [];
+    if (typeof patterns === 'string') {
+      const t = patterns.trim();
+      if (!t) return [];
+      try {
+        const parsed = JSON.parse(t);
+        if (Array.isArray(parsed)) return parsed.map(String);
+      } catch (_) {}
+      return [t];
+    }
+    if (Array.isArray(patterns)) return patterns.map(String);
+    return [];
+  }
+
+  /**
+   * Pattern → RegExp. Tampermonkey-nah:
+   * - `*.host` matcht auch Apex `host` (Subdomain optional)
+   * - übrige `*` → `.*` (V27.5)
+   * - ohne Protokoll: gegen Host+Pfad bzw. volle href
+   */
+  function patternToRegExp(pattern) {
+    let p = String(pattern).trim();
+    if (!p) return null;
+    // *.host.tld → optionaler Subdomain-Prefix (nicht „mindestens ein Label“)
+    p = p.replace(/\*\./g, '<<<SUB>>>');
+    p = p.replace(/\*/g, '<<<STAR>>>');
+    p = p.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+    p = p.replace(/<<<SUB>>>/g, '(?:.*\\.)?');
+    p = p.replace(/<<<STAR>>>/g, '.*');
+    return new RegExp(p, 'i');
+  }
+
+  function urlMatches(patterns) {
+    const href = String(location.href);
+    let hostPath = '';
+    try {
+      const u = new URL(href);
+      hostPath = u.host + u.pathname + u.search + u.hash;
+    } catch (_) {
+      hostPath = href;
+    }
+    const list = normalizePatterns(patterns);
+    if (!list.length) return true;
+    return list.some((pattern) => {
+      const raw = String(pattern).trim();
+      if (!raw) return false;
+      try {
+        const re = patternToRegExp(raw);
+        if (!re) return false;
+        if (re.test(href)) return true;
+        // Pattern ohne Schema (z.B. *.leitstellenspiel.de/*)
+        if (!/^[a-z][a-z0-9+.-]*:/i.test(raw) && re.test(hostPath)) return true;
+        // Apex-Variante zusätzlich: https://*.host → https://host
+        if (raw.includes('*.')) {
+          const apex = raw.replace('://*.', '://');
+          if (apex !== raw) {
+            const reApex = patternToRegExp(apex);
+            if (reApex && reApex.test(href)) return true;
+          }
+        }
+        return false;
+      } catch (_) {
+        return href.indexOf(raw) !== -1;
+      }
+    });
+  }
+
+  function getConfigFor(scriptId) {
+    const id = Number(scriptId);
+    const p = prefs.find((x) => Number(x.scriptId) === id);
+    return (p && p.config) || {};
+  }
+
+  function isEnabled(scriptId) {
+    const id = Number(scriptId);
+    const p = prefs.find((x) => Number(x.scriptId) === id);
+    return !!(p && p.enabled);
+  }
+
+  function prepareCode(code) {
+    let body = String(code).replace(/^\uFEFF/, '');
+    // Vollständige Userscript-Metablöcke entfernen (api-fetcher o.ä.)
+    body = body.replace(/\/\/\s*==UserScript==[\s\S]*?\/\/\s*==\/UserScript==\s*/m, '\n');
+    return body;
+  }
+
+  /**
+   * Echte Tampermonkey-GM-APIs in den Seitenkontext spiegeln
+   * (Gebäudeliste braucht Cross-Origin GM_setValue / GM_xmlhttpRequest / Listener).
+   */
+  function installPageGmBridge() {
+    try {
+      const uw = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+      if (!uw || uw.__TFN_GM_BRIDGE__) return;
+      uw.__TFN_GM_BRIDGE__ = true;
+      uw.GM_getValue = GM_getValue;
+      uw.GM_setValue = GM_setValue;
+      uw.GM_deleteValue = GM_deleteValue;
+      uw.GM_listValues = GM_listValues;
+      uw.GM_xmlhttpRequest = GM_xmlhttpRequest;
+      if (typeof GM_addValueChangeListener === 'function') {
+        uw.GM_addValueChangeListener = GM_addValueChangeListener;
+      }
+      if (typeof GM_addStyle === 'function') {
+        uw.GM_addStyle = GM_addStyle;
+      }
+      console.log('[TFN] GM-Bridge aktiv (Seitenkontext)');
+    } catch (e) {
+      console.warn('[TFN] GM-Bridge fehlgeschlagen', e);
+    }
+  }
+
+  /**
+   * Seiten ohne LSS-user_id, auf denen der Manager trotzdem Scripts ausliefern muss
+   * (Gebäudeliste tfn.tw/0, FR Pro² /fr-manager = LSS-404-Shell).
+   */
+  function isSessionHostPage() {
+    try {
+      const host = location.hostname || '';
+      const path = location.pathname || '';
+      if (/(?:^|\.)tfn\.tw$/i.test(host)) return true;
+      if (/\/rgbl_by_tfn\/?$/i.test(path)) return true;
+      if (/\/fr-manager\/?$/i.test(path) && /leitstellenspiel\.de$/i.test(host)) return true;
+    } catch (_) {}
+    return false;
+  }
+
+  /** @deprecated alias */
+  function isListHostPage() {
+    return isSessionHostPage();
+  }
+
+  /** Host-Seiten: diese Slugs ggf. forcen, falls Prefs leer / from-scratch */
+  const HOST_AUTO_ENABLE_SLUGS = ['reale-gebaeudeliste', 'lss-fr-pro'];
+
+  /**
+   * Im Seitenkontext ausführen (wie @grant none). Sandbox-new Function
+   * sieht LSS-Globals nicht – deshalb unsafeWindow.eval.
+   */
+  function executeScriptCode(code, label) {
+    const body = prepareCode(code);
+    if (!body.trim()) {
+      console.warn('[TFN] Leerer Code nach Prepare:', label);
+      return false;
+    }
+    try {
+      installPageGmBridge();
+      const uw = typeof unsafeWindow !== 'undefined' ? unsafeWindow : null;
+      if (uw && typeof uw.eval === 'function') {
+        uw.eval(body);
+      } else {
+        // eslint-disable-next-line no-eval
+        (0, eval)(body);
+      }
+      return true;
+    } catch (e) {
+      console.error('[TFN] Exec-Fehler', label, e);
+      return false;
+    }
+  }
+
+  // Manager-API auch auf der Seite sichtbar (für Script-Configs)
+  const managerApi = {
+    version: MANAGER_VERSION,
+    get sessionToken() { return sessionToken; },
+    getConfig: function (slugOrId) {
+      if (typeof slugOrId === 'number') return getConfigFor(slugOrId);
+      const s = catalog.find((c) => c.slug === slugOrId || Number(c.id) === Number(slugOrId));
+      return s ? getConfigFor(s.id) : {};
+    },
+  };
+  window.BMScriptManager = managerApi;
+  try {
+    if (typeof unsafeWindow !== 'undefined') unsafeWindow.BMScriptManager = managerApi;
+  } catch (_) {}
+
+  function publishSessionToPage(userId) {
+    try {
+      if (sessionToken) localStorage.setItem('bm_session_token', sessionToken);
+      if (userId) localStorage.setItem('bm_user_id', String(userId));
+    } catch (_) {}
+    try {
+      if (typeof unsafeWindow !== 'undefined') {
+        unsafeWindow.BMScriptManager = managerApi;
+      }
+    } catch (_) {}
+  }
+
+  async function fetchAndRunEnabled() {
+    if (killed) return;
+    if (bootStatus !== 'ok' && bootStatus !== 'starting') {
+      console.warn('[TFN] Kein Script-Lauf, Status:', bootStatus);
+      return;
+    }
+
+    const enabledIds = new Set(
+      prefs.filter((p) => p.enabled).map((p) => Number(p.scriptId))
+    );
+    const active = [];
+    let ran = 0;
+
+    if (!enabledIds.size) {
+      console.log('[TFN] Keine aktivierten Scripts (Prefs). UI-Blau ohne „Änderungen anwenden“ zählt nicht.');
+    }
+
+    for (const script of catalog) {
+      const sid = Number(script.id);
+      const label = script.slug || ('#' + sid);
+      if (!enabledIds.has(sid)) continue;
+      if (!urlMatches(script.match_patterns)) {
+        console.warn('[TFN] Skip (match):', label, script.match_patterns, 'href=', location.href);
+        continue;
+      }
+      try {
+        if (!codeRam.has(sid)) {
+          const res = await api('GET', '/api/scripts/' + sid + '/content');
+          if (res && typeof res.content === 'string') {
+            codeRam.set(sid, res.content);
+          } else {
+            console.error('[TFN] Content leer/ungültig:', label, res);
+            continue;
+          }
+        }
+        const code = codeRam.get(sid);
+        if (!code) continue;
+        if (executeScriptCode(code, label)) {
+          active.push(sid);
+          ran++;
+        }
+      } catch (e) {
+        console.error('[TFN] Fetch/Exec-Fehler', label, e);
+      }
+    }
+
+    console.log('[TFN]', ran, 'Module geladen (enabled=' + enabledIds.size + ', katalog=' + catalog.length + ').');
+
+    try {
+      await api('POST', '/api/stats/heartbeat', { active_script_ids: active });
+    } catch (_) {}
+  }
+
+  /**
+   * Server-Prefs holen und in RAM+IDB schreiben.
+   * @param {{force?: boolean}} [opts] force=true auch wenn Sync-Toggle aus (Kill-Recovery)
+   * @returns {Promise<{pulled:number, enabledFromServer:number, error?: string}>}
+   */
+  async function pullServerPrefs(opts) {
+    const force = !!(opts && opts.force);
+    if (!syncEnabled && !force) {
+      return { pulled: 0, enabledFromServer: 0 };
+    }
+    try {
+      const res = await api('GET', '/api/prefs/sync');
+      if (!res || !Array.isArray(res.prefs)) {
+        return { pulled: 0, enabledFromServer: 0 };
+      }
+      let pulled = 0;
+      let enabledFromServer = 0;
+      for (const item of res.prefs) {
+        const scriptId = Number(item.script_id);
+        if (!scriptId) continue;
+        let local = prefs.find((p) => Number(p.scriptId) === scriptId);
+        if (!local) {
+          local = { scriptId, enabled: false, config: {} };
+          prefs.push(local);
+        }
+        if (item.config && typeof item.config === 'object') {
+          local.config = Object.assign({}, local.config, item.config);
+        }
+        if (item.enabled != null) {
+          local.enabled = !!item.enabled;
+          if (local.enabled) enabledFromServer++;
+        }
+        local.scriptId = scriptId;
+        await idbPutPref(local);
+        pulled++;
+      }
+      console.log('[TFN] prefs/sync GET:', pulled, 'Einträge,', enabledFromServer, 'enabled');
+      return { pulled, enabledFromServer };
+    } catch (e) {
+      console.warn('[TFN] prefs/sync GET fehlgeschlagen', e);
+      return { pulled: 0, enabledFromServer: 0, error: formatApiError(e) };
+    }
+  }
+
+  async function pushServerPrefs() {
+    if (!syncEnabled) return;
+    try {
+      await api('PUT', '/api/prefs/sync', {
+        sync_enabled: true,
+        prefs: prefs.map((p) => ({
+          script_id: p.scriptId,
+          enabled: p.enabled,
+          config: p.config || {},
+        })),
+      });
+    } catch (_) {}
+  }
+
+  function ensurePrefsForCatalog() {
+    for (const s of catalog) {
+      const sid = Number(s.id);
+      if (!prefs.find((p) => Number(p.scriptId) === sid)) {
+        prefs.push({ scriptId: sid, enabled: false, config: {} });
+      }
+    }
+    // IDs normalisieren (IndexedDB kann Number/String mischen)
+    prefs = prefs.map((p) => ({
+      scriptId: Number(p.scriptId),
+      enabled: !!p.enabled,
+      config: p.config && typeof p.config === 'object' ? p.config : {},
+    }));
+    draftEnabled = {};
+    prefs.forEach((p) => { draftEnabled[p.scriptId] = !!p.enabled; });
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  // -------------------------------------------------------------------------
+  // UI – Look/Feel wie V27.5, Einstieg über Profilmenü
+  // -------------------------------------------------------------------------
+  function ensureStyles() {
+    if (document.getElementById('bm-mvp-styles')) return;
+    GM_addStyle(`
+      :root {
+        --bm-bg-dark: #1e2126;
+        --bm-bg-panel: #2c313a;
+        --bm-text-main: #eeeeee;
+        --bm-text-muted: #aaaaaa;
+        --bm-primary-blue: #0d6efd;
+        --bm-primary-blue-hover: #0b5ed7;
+        --bm-success-color: #28a745;
+        --bm-warning-color: #f0ad4e;
+        --bm-danger-color: #dc3545;
+        --bm-btn-secondary: #5a6268;
+        --bm-border-color: #444c5e;
+        --bm-shadow-soft: 0 4px 6px rgba(0,0,0,0.3);
+        --bm-font: "Segoe UI", "Roboto", "Helvetica Neue", Arial, sans-serif;
+        --bm-input-bg: #f0f2f5;
+      }
+
+      #lss-script-manager-container {
+        font-family: var(--bm-font); color: var(--bm-text-main); font-size: 14px;
+        position: fixed; top: 8vh; left: 50%; transform: translateX(-50%); z-index: 10000;
+        background-color: var(--bm-bg-dark); border: 1px solid var(--bm-border-color);
+        border-radius: 8px; height: 80vh; width: 90%; max-width: 1200px;
+        display: none; flex-direction: column; box-sizing: border-box;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.5); overflow: hidden;
+      }
+      #lss-script-manager-container.visible { display: flex; }
+
+      #lss-script-manager-container .bm-manager-header {
+        flex-shrink: 0; padding: 20px 20px 0 20px; background-color: var(--bm-bg-dark);
+        border-bottom: 1px solid var(--bm-border-color); z-index: 20; position: relative;
+      }
+      #lss-script-manager-container .bm-manager-body {
+        flex-grow: 1; overflow-y: auto; padding: 20px; background: rgba(0,0,0,0.1);
+      }
+      #lss-script-manager-container .bm-manager-footer {
+        flex-shrink: 0; padding: 15px 20px; background-color: var(--bm-bg-dark);
+        border-top: 1px solid var(--bm-border-color);
+      }
+      #lss-script-manager-container .bm-manager-body::-webkit-scrollbar { width: 8px; }
+      #lss-script-manager-container .bm-manager-body::-webkit-scrollbar-thumb {
+        background-color: var(--bm-border-color); border-radius: 4px;
+      }
+
+      #lss-script-manager-container h3 {
+        text-align: center; border-bottom: 2px solid var(--bm-primary-blue);
+        padding-bottom: 12px; margin: 0 0 20px 0; font-weight: 300; font-size: 1.8em; letter-spacing: 1px;
+      }
+      #lss-script-manager-container .bm-level-chip {
+        display: inline-block; margin-left: 10px; padding: 2px 8px; vertical-align: middle;
+        font-size: 0.45em; font-weight: 500; letter-spacing: 0.02em;
+        color: var(--bm-text-muted); background: #2a3038; border: 1px solid #3d4554;
+        border-radius: 4px; opacity: 0.85;
+      }
+      #lss-script-manager-container .bm-toolbar {
+        display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; gap: 15px; flex-wrap: wrap;
+      }
+      #lss-script-manager-container #bm-script-filter {
+        background-color: var(--bm-input-bg); color: #222; border: 1px solid #999;
+        border-radius: 6px; padding: 8px 12px; font-size: 1em; width: 300px; max-width: 100%;
+      }
+      #lss-script-manager-container .bm-toolbar-right { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+      #lss-script-manager-container .bm-actions { display: flex; gap: 14px; align-items: center; }
+      #lss-script-manager-container .bm-actions span,
+      #lss-script-manager-container .bm-actions label {
+        font-size: 1.05em; cursor: pointer; color: var(--bm-text-muted); user-select: none;
+      }
+      #lss-script-manager-container .bm-actions span:hover { color: var(--bm-text-main); }
+      #lss-script-manager-container #bm-stats-bar { color: var(--bm-text-muted); font-size: 0.95em; }
+
+      #lss-script-manager-container #bm-tabs-area { margin: 0 0 12px 0; }
+      #lss-script-manager-container .bm-tabs {
+        display: flex; flex-wrap: nowrap; width: 100%; gap: 2px; overflow-x: auto;
+      }
+      #lss-script-manager-container .bm-tab {
+        flex: 1; min-width: 0; padding: 10px 6px; background: #333; color: #aaa; cursor: pointer;
+        border-radius: 5px 5px 0 0; font-weight: 500; text-align: center;
+        border: 1px solid #444; border-bottom: none;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      }
+      #lss-script-manager-container .bm-tab:hover { color: #eee; }
+      #lss-script-manager-container .bm-tab.active {
+        flex-grow: 3; background-color: var(--bm-primary-blue) !important; color: white !important; font-weight: bold;
+      }
+
+      #lss-script-manager-container .bm-category-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, 200px);
+        grid-auto-rows: 118px;
+        gap: 12px; padding-bottom: 10px; align-items: stretch; justify-content: start;
+      }
+      #lss-script-manager-container .script-button {
+        padding: 12px 12px 28px 12px; border-radius: 6px; cursor: pointer; position: relative;
+        background: var(--bm-bg-panel); text-align: center;
+        width: 200px; height: 118px; min-width: 200px; max-width: 200px;
+        min-height: 118px; max-height: 118px; box-sizing: border-box;
+        display: flex; flex-direction: column; justify-content: center; align-items: center;
+        transition: transform 0.2s, box-shadow 0.2s; border: 1px solid transparent;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.2); overflow: hidden;
+      }
+      #lss-script-manager-container .script-button:hover { transform: translateY(-3px); box-shadow: var(--bm-shadow-soft); z-index: 10; }
+      #lss-script-manager-container .script-button.active { background: var(--bm-primary-blue); color: white; border: none; }
+      #lss-script-manager-container .script-button.inactive { background: #343a40; color: #aaa; border: 1px solid var(--bm-border-color); opacity: 0.9; }
+      #lss-script-manager-container .script-button .bm-script-title {
+        font-size: 1em; line-height: 1.25; max-width: 100%;
+        display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+        overflow: hidden; word-break: break-word;
+      }
+      #lss-script-manager-container .script-button .version {
+        font-size: 0.85em; margin-top: 6px; opacity: 0.9; flex-shrink: 0;
+      }
+      #lss-script-manager-container .script-button .bm-tile-footer {
+        position: absolute; left: 0; right: 0; bottom: 0;
+        height: 22px; padding: 0 28px 0 10px; text-align: left;
+        display: flex; align-items: center;
+        font-size: 0.68em; font-weight: 500; letter-spacing: 0.04em;
+        opacity: 0.55; border-top: 1px solid rgba(255,255,255,0.12);
+        background: rgba(0,0,0,0.22); line-height: 1; box-sizing: border-box;
+      }
+      #lss-script-manager-container .script-button.inactive .bm-tile-footer {
+        border-top-color: rgba(255,255,255,0.08); background: rgba(0,0,0,0.28);
+      }
+
+      #lss-script-manager-container #save-scripts-button {
+        width: 100%; padding: 14px; font-weight: bold; color: white;
+        background-color: var(--bm-primary-blue); border: none; border-radius: 6px;
+        cursor: pointer; font-size: 1.1em;
+      }
+      #lss-script-manager-container #save-scripts-button:hover { background-color: var(--bm-primary-blue-hover); }
+      #lss-script-manager-container #save-scripts-button[disabled] { opacity: 0.45; cursor: default; }
+
+      #lss-script-manager-container .bm-close-btn {
+        position: absolute; top: 15px; right: 20px; font-size: 24px; cursor: pointer; color: var(--bm-text-muted);
+      }
+      #lss-script-manager-container .bm-banner {
+        background: #422006; color: #fde68a; border: 1px solid #a16207;
+        border-radius: 6px; padding: 12px; margin-bottom: 12px;
+      }
+      #lss-script-manager-container .bm-loader-container {
+        padding: 40px; text-align: center; color: var(--bm-text-muted); grid-column: 1 / -1;
+      }
+
+      #lss-script-manager-container .bm-manual-btn {
+        position: absolute; bottom: 3px; right: 6px; font-size: 1em; opacity: 0.7;
+        cursor: pointer; z-index: 2; line-height: 1; padding: 2px 4px;
+      }
+      #lss-script-manager-container .bm-manual-btn:hover { opacity: 1; transform: scale(1.15); }
+      #lss-script-manager-container .script-button.active .bm-manual-btn { filter: drop-shadow(0 0 1px #000); }
+
+      #bm-manual-modal {
+        display: none; position: fixed; inset: 0; z-index: 10006;
+        background: rgba(0,0,0,0.55); align-items: center; justify-content: center;
+        font-family: var(--bm-font, sans-serif);
+      }
+      #bm-manual-modal.visible { display: flex; }
+      #bm-manual-modal .bm-manual-panel {
+        width: 90%; max-width: 900px; height: 85vh; background: #2c313a; color: #eee;
+        border: 1px solid #444c5e; border-radius: 8px; display: flex; flex-direction: column;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.5); overflow: hidden;
+      }
+      #bm-manual-modal .bm-manual-header {
+        padding: 14px 18px; border-bottom: 1px solid #444c5e; font-size: 1.15em; font-weight: 600;
+      }
+      #bm-manual-modal #bm-manual-body {
+        flex: 1; overflow-y: auto; padding: 0; background: #fff; color: #222;
+      }
+      #bm-manual-modal .bm-manual-footer {
+        padding: 12px 18px; border-top: 1px solid #444c5e; text-align: right;
+      }
+      #bm-manual-modal .bm-manual-footer button {
+        padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer;
+        background: #5a6268; color: #fff; font-weight: 600;
+      }
+
+      #b-m-scriptmanager-link.bm-update-highlight,
+      #menu_profile.bm-update-highlight {
+        background-color: var(--bm-primary-blue) !important; color: #ffffff !important; border-radius: 4px;
+      }
+    `);
+    const marker = document.createElement('meta');
+    marker.id = 'bm-mvp-styles';
+    (document.head || document.documentElement).appendChild(marker);
+  }
+
+  function createManagerUI() {
+    if (managerUiCreated) return;
+    ensureStyles();
+    const div = document.createElement('div');
+    div.id = 'lss-script-manager-container';
+    div.innerHTML = `
+      <div class="bm-manager-header">
+        <span class="bm-close-btn" title="Schließen">&times;</span>
+        <h3>TFN-Scriptmanager <span class="bm-level-chip" id="bm-level-label" title="Berechtigungsstufe">Stufe ?</span></h3>
+        <div class="bm-toolbar">
+          <input type="text" id="bm-script-filter" placeholder="Suche...">
+          <div class="bm-toolbar-right">
+            <div id="bm-stats-bar">…</div>
+            <div class="bm-actions">
+              <label title="Config-Sync zum Server"><input type="checkbox" id="bm-sync-toggle" ${syncEnabled ? 'checked' : ''}/> Sync</label>
+              <span id="bm-manager-manual-btn" title="Manager-Anleitung">📖</span>
+              <span id="bm-refresh-btn" title="Katalog neu laden">🔄</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="bm-manager-body">
+        <div id="bm-status-banner"></div>
+        <div id="bm-tabs-area"></div>
+        <div id="bm-grid-area" class="bm-category-grid"></div>
+      </div>
+      <div class="bm-manager-footer">
+        <button type="button" id="save-scripts-button">Änderungen anwenden</button>
+        <div style="text-align:right;font-size:0.7em;color:var(--bm-text-muted);margin-top:5px;opacity:0.6;">
+          v${MANAGER_VERSION} · ${escapeHtml(API_BASE)}
+        </div>
+      </div>
+    `;
+    document.body.appendChild(div);
+
+    div.querySelector('.bm-close-btn').onclick = async () => {
+      // Wie alter Manager: offene Entwürfe beim Schließen übernehmen
+      if (hasDraftChanges()) {
+        await applyChanges();
+        return;
+      }
+      div.classList.remove('visible');
+    };
+    document.getElementById('bm-refresh-btn').onclick = () => reloadCatalogIntoUI();
+    document.getElementById('bm-manager-manual-btn').onclick = () => {
+      showManualUI('TFN-Scriptmanager', MANAGER_MANUAL_HTML);
+    };
+    document.getElementById('bm-script-filter').addEventListener('input', (e) => {
+      filterText = (e.target.value || '').toLowerCase();
+      renderGrid();
+    });
+    document.getElementById('bm-sync-toggle').addEventListener('change', (e) => {
+      syncEnabled = !!e.target.checked;
+      GM_setValue(GM_SYNC_KEY, syncEnabled);
+      if (syncEnabled) {
+        pullServerPrefs({ force: true }).then(() => {
+          ensurePrefsForCatalog();
+          renderGrid();
+        });
+      }
+    });
+    document.getElementById('save-scripts-button').addEventListener('click', () => applyChanges());
+
+    managerUiCreated = true;
+  }
+
+
+  const manualCache = {};
+
+  function ensureManualModal() {
+    let modal = document.getElementById('bm-manual-modal');
+    if (modal) return modal;
+    ensureStyles();
+    modal = document.createElement('div');
+    modal.id = 'bm-manual-modal';
+    modal.innerHTML = `
+      <div class="bm-manual-panel">
+        <div class="bm-manual-header">📖 Anleitung</div>
+        <div id="bm-manual-body">Lade Inhalt…</div>
+        <div class="bm-manual-footer">
+          <button type="button" id="bm-manual-close">Schließen</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) modal.classList.remove('visible');
+    });
+    document.getElementById('bm-manual-close').onclick = () => modal.classList.remove('visible');
+    return modal;
+  }
+
+  function showManualUI(scriptName, htmlContent) {
+    const modal = ensureManualModal();
+    modal.querySelector('.bm-manual-header').textContent = '📖 Anleitung: ' + scriptName;
+    document.getElementById('bm-manual-body').innerHTML = htmlContent || '<p style="padding:16px;">Keine Anleitung.</p>';
+    modal.classList.add('visible');
+  }
+
+  async function openScriptManual(script) {
+    const sid = Number(script.id);
+    const title = script.title || script.slug || ('#' + sid);
+    if (manualCache[sid]) {
+      showManualUI(title, manualCache[sid]);
+      return;
+    }
+    showManualUI(title, '<p style="padding:16px;color:#555;">Lade Anleitung…</p>');
+    try {
+      const res = await api('GET', '/api/scripts/' + sid + '/manual');
+      const html = (res && res.manual_html) ? String(res.manual_html) : '';
+      if (!html) {
+        showManualUI(title, '<p style="padding:16px;">Keine Anleitung hinterlegt.</p>');
+        return;
+      }
+      manualCache[sid] = html;
+      showManualUI(title, html);
+    } catch (e) {
+      showManualUI(title, '<p style="padding:16px;color:#b91c1c;">Anleitung nicht ladbar: ' + escapeHtml(formatApiError(e)) + '</p>');
+    }
+  }
+
+
+  /** Katalog: categories[] (M:N); Fallback category / Sonstiges */
+  function scriptCategories(s) {
+    if (s && Array.isArray(s.categories) && s.categories.length) {
+      return s.categories;
+    }
+    if (s && s.category && s.category.slug) {
+      return [s.category];
+    }
+    return [{ slug: 'sonstiges', title: 'Sonstiges', sort_order: 999 }];
+  }
+
+  function scriptCategoryTitles(s) {
+    return scriptCategories(s).map((c) => String(c.title || c.slug || '')).filter(Boolean).join(', ') || 'Sonstiges';
+  }
+
+  function scriptInCategory(s, slug) {
+    return scriptCategories(s).some((c) => String(c.slug) === slug);
+  }
+
+  function renderCategoryTabs(visibleItems) {
+    const tabsArea = document.getElementById('bm-tabs-area');
+    if (!tabsArea) return;
+    tabsArea.innerHTML = '';
+    const counts = {};
+    visibleItems.forEach((s) => {
+      scriptCategories(s).forEach((c) => {
+        const key = String(c.slug || 'sonstiges');
+        counts[key] = (counts[key] || 0) + 1;
+      });
+    });
+
+    const bar = document.createElement('div');
+    bar.className = 'bm-tabs';
+
+    const allTab = document.createElement('div');
+    allTab.className = 'bm-tab' + (activeCategoryTab === 'Alle' ? ' active' : '');
+    allTab.textContent = 'Alle (' + visibleItems.length + ')';
+    allTab.onclick = () => { activeCategoryTab = 'Alle'; renderGrid(); };
+    bar.appendChild(allTab);
+
+    const ordered = (categories && categories.length)
+      ? categories.slice()
+      : [{ slug: 'sonstiges', title: 'Sonstiges', sort_order: 999 }];
+
+    // Also show unknown categories present in catalog
+    const known = {};
+    ordered.forEach((c) => { known[c.slug] = true; });
+    visibleItems.forEach((s) => {
+      scriptCategories(s).forEach((c) => {
+        const key = String(c.slug || 'sonstiges');
+        if (!known[key]) {
+          ordered.push({
+            slug: key,
+            title: String(c.title || key),
+            sort_order: 500,
+          });
+          known[key] = true;
+        }
+      });
+    });
+
+    // Tabs alphabetisch (de); „Alle“ bleibt davor
+    ordered.sort((a, b) => String(a.title || '').localeCompare(String(b.title || ''), 'de', { sensitivity: 'base' }));
+
+    ordered.forEach((c) => {
+      const n = counts[c.slug] || 0;
+      if (!n) return;
+      const tab = document.createElement('div');
+      tab.className = 'bm-tab' + (activeCategoryTab === c.slug ? ' active' : '');
+      tab.textContent = c.title + ' (' + n + ')';
+      tab.title = c.title;
+      tab.onclick = () => { activeCategoryTab = c.slug; renderGrid(); };
+      bar.appendChild(tab);
+    });
+
+    tabsArea.appendChild(bar);
+  }
+
+  function hasDraftChanges() {
+    for (const s of catalog) {
+      const sid = Number(s.id);
+      if (!!draftEnabled[sid] !== isEnabled(sid)) return true;
+    }
+    return false;
+  }
+
+  function renderGrid() {
+    const grid = document.getElementById('bm-grid-area');
+    const banner = document.getElementById('bm-status-banner');
+    const stats = document.getElementById('bm-stats-bar');
+    const levelLabel = document.getElementById('bm-level-label');
+    const saveBtn = document.getElementById('save-scripts-button');
+    if (!grid) return;
+
+    if (levelLabel) levelLabel.textContent = 'Stufe ' + String(permissionLevel);
+
+    if (bootStatus !== 'ok') {
+      if (banner) {
+        banner.innerHTML = `<div class="bm-banner"><strong>${escapeHtml(bootStatus)}</strong><br>${escapeHtml(bootMessage || '')}</div>`;
+      }
+      grid.innerHTML = '';
+      if (saveBtn) saveBtn.disabled = true;
+      if (stats) stats.textContent = 'Keine Scripts';
+      return;
+    }
+
+    const visibleCount = catalog.length;
+    const savedCount = catalog.filter((s) => isEnabled(Number(s.id))).length;
+    if (banner) {
+      if (recoveryNote) {
+        banner.innerHTML = `<div class="bm-banner">${escapeHtml(recoveryNote)}</div>`;
+      } else if (!savedCount && visibleCount) {
+        banner.innerHTML = `<div class="bm-banner"><strong>Nichts aktiv</strong> – Kachel anklicken (blau = gewählt), dann „Änderungen anwenden“ oder Manager schließen (übernimmt Auswahl). Allein blau startet keine Scripts.</div>`;
+      } else {
+        banner.innerHTML = '';
+      }
+    }
+    if (saveBtn) saveBtn.disabled = false;
+
+    const filtered = catalog.filter((s) => {
+      if (!filterText) return true;
+      const hay = ((s.title || '') + ' ' + (s.slug || '') + ' ' + (s.description || '') + ' ' + scriptCategoryTitles(s)).toLowerCase();
+      return hay.includes(filterText);
+    });
+    renderCategoryTabs(filtered);
+    const items = filtered.filter((s) => {
+      if (activeCategoryTab === 'Alle') return true;
+      return scriptInCategory(s, activeCategoryTab);
+    });
+
+    grid.innerHTML = '';
+    if (!items.length) {
+      grid.innerHTML = '<div class="bm-loader-container">Kein Skript in dieser Kategorie.</div>';
+    } else {
+      items.forEach((s) => {
+        const sid = Number(s.id);
+        const on = !!draftEnabled[sid];
+        const saved = isEnabled(sid);
+        const tile = document.createElement('div');
+        tile.className = 'script-button ' + (on ? 'active' : 'inactive');
+        // Kurzinfo nur per Hover (title) – nicht auf der Kachel (überdeckt 📖)
+        tile.title = (s.description || s.title || '').replace(/<[^>]*>?/gm, '');
+        tile.innerHTML =
+          `<strong class="bm-script-title">${escapeHtml(s.title)}</strong>` +
+          `<div class="version">v${escapeHtml(s.version)}` +
+          (on && !saved ? ' · gewählt' : (saved ? ' · aktiv' : '')) +
+          `</div>` +
+          `<div class="bm-tile-footer" title="Min. Stufe">L${escapeHtml(String(s.permission_level))}</div>`;
+        if (s.has_manual) {
+          const man = document.createElement('span');
+          man.className = 'bm-manual-btn';
+          man.title = 'Anleitung öffnen';
+          man.textContent = '📖';
+          man.onclick = (e) => {
+            e.stopPropagation();
+            openScriptManual(s);
+          };
+          tile.appendChild(man);
+        }
+        tile.onclick = () => {
+          draftEnabled[sid] = !draftEnabled[sid];
+          renderGrid();
+          updateSaveVisibility();
+        };
+        grid.appendChild(tile);
+      });
+    }
+
+    if (stats) {
+      stats.innerHTML = `Scripts: <span style="color:#eee;font-weight:bold;">${visibleCount}</span> | Aktiv: <span style="color:var(--bm-primary-blue);font-weight:bold;">${savedCount}</span>`;
+    }
+    updateSaveVisibility();
+  }
+
+  function updateSaveVisibility() {
+    const saveBtn = document.getElementById('save-scripts-button');
+    if (!saveBtn) return;
+    saveBtn.style.display = hasDraftChanges() ? 'block' : 'none';
+  }
+
+  async function applyChanges() {
+    for (const s of catalog) {
+      const sid = Number(s.id);
+      let pref = prefs.find((p) => Number(p.scriptId) === sid);
+      if (!pref) {
+        pref = { scriptId: sid, enabled: false, config: {} };
+        prefs.push(pref);
+      }
+      pref.scriptId = sid;
+      pref.enabled = !!draftEnabled[sid];
+      await idbPutPref(pref);
+    }
+    await pushServerPrefs();
+    // Reload wie V27.5 – Boot holt Content und führt im Seitenkontext aus
+    const container = document.getElementById('lss-script-manager-container');
+    if (container) container.classList.remove('visible');
+    location.reload();
+  }
+
+  async function reloadCatalogIntoUI() {
+    const grid = document.getElementById('bm-grid-area');
+    if (grid) grid.innerHTML = '<div class="bm-loader-container">Lade Katalog…</div>';
+    try {
+      const cat = await api('GET', '/api/scripts/catalog');
+      catalog = (cat.scripts || []).map((s) => Object.assign({}, s, { id: Number(s.id) }));
+      categories = Array.isArray(cat.categories) ? cat.categories : [];
+      ensurePrefsForCatalog();
+      renderGrid();
+    } catch (e) {
+      bootStatus = 'error';
+      bootMessage = formatApiError(e);
+      renderGrid();
+    }
+  }
+
+  function openManager() {
+    createManagerUI();
+    const container = document.getElementById('lss-script-manager-container');
+    if (!container) return;
+    container.classList.add('visible');
+    renderGrid();
+  }
+
+  function initUIHooks() {
+    ensureStyles();
+    const tryInsert = () => {
+      if (killed) return true;
+      if (document.getElementById('b-m-scriptmanager-link')) return true;
+      const settingsLink = document.querySelector('a[href="/settings/index"]');
+      const userMenu = settingsLink && settingsLink.parentNode;
+      if (!userMenu || !userMenu.parentNode) return false;
+
+      const li = document.createElement('li');
+      li.innerHTML = `<a href="#" id="b-m-scriptmanager-link"><img class="icon icons8-Settings" src="/images/icons8-settings.svg" width="24" height="24"> TFN-Scriptmanager</a>`;
+      userMenu.parentNode.insertBefore(li, userMenu.nextSibling);
+      document.getElementById('b-m-scriptmanager-link').addEventListener('click', (e) => {
+        e.preventDefault();
+        openManager();
+      });
+      return true;
+    };
+
+    if (tryInsert()) return;
+    const t0 = Date.now();
+    const iv = setInterval(() => {
+      if (tryInsert() || Date.now() - t0 > 15000) clearInterval(iv);
+    }, 250);
+  }
+
+  /**
+   * Host ohne LSS-user_id (tfn.tw/0, /fr-manager, …):
+   * Session aus GM/Hash → Katalog → matching Scripts (GM-Bridge + Eval).
+   */
+  async function bootListHost() {
+    installPageGmBridge();
+    killed = false;
+
+    sessionToken = GM_getValue(GM_SESSION_KEY, null);
+    try {
+      const m = String(location.hash || '').match(/tfn_sess=([a-f0-9]{64})/i);
+      if (m) {
+        sessionToken = m[1];
+        GM_setValue(GM_SESSION_KEY, sessionToken);
+        history.replaceState(null, '', location.pathname + location.search);
+      }
+    } catch (_) {}
+
+    if (!sessionToken) {
+      bootStatus = 'error';
+      bootMessage = 'Host-Seite ohne Session. Bitte zuerst normales LSS mit TFN-Scriptmanager öffnen (Session anlegen), dann diesen Tab neu laden.';
+      console.warn('[TFN]', bootMessage);
+      return;
+    }
+
+    publishSessionToPage(GM_getValue('bm_last_user_id', null));
+
+    try {
+      await openDb();
+      prefs = (await idbAllPrefs()).map((p) => ({
+        scriptId: Number(p.scriptId),
+        enabled: !!p.enabled,
+        config: p.config || {},
+      }));
+    } catch (e) {
+      console.warn('[TFN] IndexedDB auf Host-Seite:', e);
+      prefs = [];
+    }
+
+    try {
+      const cat = await api('GET', '/api/scripts/catalog');
+      catalog = (cat.scripts || []).map((s) => Object.assign({}, s, { id: Number(s.id) }));
+      categories = Array.isArray(cat.categories) ? cat.categories : [];
+    } catch (e) {
+      bootStatus = 'error';
+      bootMessage = 'Katalog auf Host-Seite fehlgeschlagen. ' + formatApiError(e);
+      console.warn('[TFN]', bootMessage, e);
+      return;
+    }
+
+    ensurePrefsForCatalog();
+    await pullServerPrefs({ force: true });
+    ensurePrefsForCatalog();
+
+    // Host-Scripts: wenn URL matcht und Pref noch aus/fehlend → aktivieren
+    // (sonst bleibt /fr-manager leer, obwohl Katalog den Eintrag hat).
+    for (const s of catalog) {
+      const sid = Number(s.id);
+      const slug = String(s.slug || '');
+      const matchesHere = urlMatches(s.match_patterns);
+      if (!matchesHere) continue;
+      const forceSlug = HOST_AUTO_ENABLE_SLUGS.indexOf(slug) !== -1;
+      let pref = prefs.find((p) => Number(p.scriptId) === sid);
+      if (!pref) {
+        pref = { scriptId: sid, enabled: forceSlug, config: {} };
+        prefs.push(pref);
+      } else if (forceSlug && !pref.enabled) {
+        pref.enabled = true;
+      }
+      draftEnabled[sid] = !!pref.enabled;
+      try { await idbPutPref(pref); } catch (_) {}
+    }
+
+    bootStatus = 'ok';
+    bootMessage = '';
+    await fetchAndRunEnabled();
+    console.log('[TFN] Host-Seite bereit ·', location.pathname, '· v' + MANAGER_VERSION,
+      '· aktiv', prefs.filter((p) => p.enabled).length);
+  }
+
+  // -------------------------------------------------------------------------
+  // Boot – session/start sofort beim Seitenladen (Auto-Create User), UI nur Menü
+  // -------------------------------------------------------------------------
+  async function boot() {
+    const user = readPageUser();
+    if (!user.user_id) {
+      if (isSessionHostPage()) {
+        await bootListHost();
+        return;
+      }
+      console.warn('[TFN] Keine user_id auf der Seite – Abbruch.');
+      return;
+    }
+
+    try {
+      await openDb();
+      prefs = (await idbAllPrefs()).map((p) => ({
+        scriptId: Number(p.scriptId),
+        enabled: !!p.enabled,
+        config: p.config || {},
+      }));
+    } catch (e) {
+      console.error('[TFN] IndexedDB Fehler', e);
+    }
+
+    // Profilmenü früh einhängen (auch bei Fehler später nutzbar)
+    initUIHooks();
+
+    let session;
+    try {
+      const startBody = {
+        user_id: user.user_id,
+        manager_version: MANAGER_VERSION,
+      };
+      if (user.display_name) startBody.display_name = user.display_name;
+      session = await api('POST', '/api/session/start', startBody);
+    } catch (e) {
+      console.warn('[TFN] session/start fehlgeschlagen', e);
+      bootStatus = e && e.kind === 'http' ? 'error' : 'offline';
+      bootMessage = formatApiError(e);
+      return;
+    }
+
+    const action = session.action || session.mode;
+    const lvl = Number(session.permission_level);
+    if (session.display_name) {
+      try { GM_setValue('bm_last_display_name', String(session.display_name).slice(0, 128)); } catch (_) {}
+    } else if (user.display_name) {
+      try { GM_setValue('bm_last_display_name', user.display_name); } catch (_) {}
+    }
+    console.log('[TFN] session/start →', {
+      action: action,
+      mode: session.mode,
+      permission_level: lvl,
+      display_name: session.display_name || user.display_name || null,
+      has_token: !!session.session_token,
+      version: MANAGER_VERSION,
+    });
+
+    if (action === 'kill' || lvl < 0) {
+      await performKill(session.message || 'kill');
+      return;
+    }
+    if (action === 'maintenance' || action === 'off') {
+      bootStatus = action;
+      bootMessage = session.message || 'Keine Scripts aktiv.';
+      return;
+    }
+
+    // Jeder erfolgreiche Start: Kill-Flags weg (kein GM-Surgery nötig)
+    const wasKilled = await recoverFromKillIfNeeded();
+    recoveredFromKill = wasKilled;
+
+    sessionToken = session.session_token;
+    permissionLevel = lvl || 0;
+    if (sessionToken) GM_setValue(GM_SESSION_KEY, sessionToken);
+    try { GM_setValue('bm_last_user_id', session.user_id || user.user_id); } catch (_) {}
+    publishSessionToPage(session.user_id || user.user_id);
+    installPageGmBridge();
+
+    try {
+      const cat = await api('GET', '/api/scripts/catalog');
+      catalog = (cat.scripts || []).map((s) => Object.assign({}, s, { id: Number(s.id) }));
+      categories = Array.isArray(cat.categories) ? cat.categories : [];
+    } catch (e) {
+      bootStatus = 'error';
+      bootMessage = 'Katalog konnte nicht geladen werden. ' + formatApiError(e);
+      return;
+    }
+
+    ensurePrefsForCatalog();
+    // Nach Kill: Sync immer vom Server ziehen (auch wenn Toggle vorher aus war)
+    const pull = await pullServerPrefs({ force: wasKilled || syncEnabled });
+    ensurePrefsForCatalog();
+
+    const enabledCount = prefs.filter((p) => p.enabled).length;
+    if (wasKilled) {
+      if (pull.error) {
+        recoveryNote = 'Nach Sperre: Server-Prefs nicht ladbar (' + pull.error + '). localStorage leer ist OK. Kacheln aktivieren, dann Anwenden oder Manager schließen.';
+      } else if (enabledCount > 0) {
+        recoveryNote = 'Nach Sperre: ' + enabledCount + ' Script(s) vom Server-Sync wiederhergestellt – starten automatisch. (leeres localStorage ist OK)';
+      } else {
+        recoveryNote = 'Nach Sperre: nichts aktiv – lokale Prefs waren geleert, Server hatte keine gespeicherten Enables. Kacheln einschalten, dann „Änderungen anwenden“ oder Manager schließen. Kein GM-Zugriff nötig.';
+      }
+      console.log('[TFN] Recovery-Hinweis:', recoveryNote);
+    } else {
+      recoveryNote = '';
+    }
+
+    bootStatus = 'ok';
+    bootMessage = '';
+
+    // Scripts sofort ausführen – unabhängig davon, ob UI geöffnet wird
+    await fetchAndRunEnabled();
+
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    heartbeatTimer = setInterval(() => {
+      const active = prefs.filter((p) => p.enabled).map((p) => Number(p.scriptId))
+        .filter((id) => codeRam.has(id));
+      api('POST', '/api/stats/heartbeat', { active_script_ids: active }).catch(() => {});
+    }, HEARTBEAT_MS);
+
+    console.log('[TFN] bereit · v' + MANAGER_VERSION + ' · Stufe', permissionLevel, '· Katalog', catalog.length,
+      '· gespeichert aktiv', enabledCount,
+      wasKilled ? '· nach-Kill-Recovery' : '');
+  }
+
+  function startWhenReady() {
+    const run = () => { boot().catch(console.error); };
+    if (document.body) run();
+    else {
+      const iv = setInterval(() => {
+        if (document.body) {
+          clearInterval(iv);
+          run();
+        }
+      }, 50);
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', startWhenReady);
+  } else {
+    startWhenReady();
+  }
+})();
