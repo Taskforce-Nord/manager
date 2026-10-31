@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TFN-Scriptmanager
 // @namespace    https://tfn.tw/manager
-// @version      1.3.11
+// @version      1.3.12
 // @description  Bootstrap: Session→Katalog→Enable→Fetch+Eval (RAM). UI wie V27.5 inkl. HTML-Anleitungen und Multi-Kategorie-Tabs. Kein GitHub/PAT.
 // @author       Masklin
 // @match        https://www.leitstellenspiel.de/*
@@ -15,13 +15,14 @@
 // @grant        GM_addStyle
 // @grant        GM_addValueChangeListener
 // @connect      tfn.tw
+// @connect      *
 // @run-at       document-start
 // ==/UserScript==
 
 (function () {
   'use strict';
 
-  const MANAGER_VERSION = '1.3.11';
+  const MANAGER_VERSION = '1.3.12';
   const API_BASE = 'https://tfn.tw/manager';
   const API_USE_QUERY_FALLBACK = false; // true → …/index.php?r=api/…
   const DB_NAME = 'BM-DB-TN-v2';
@@ -527,7 +528,9 @@
 
   /**
    * Echte Tampermonkey-GM-APIs in den Seitenkontext spiegeln
-   * (Gebäudeliste braucht Cross-Origin GM_setValue / GM_xmlhttpRequest / Listener).
+   * (Gebäudeliste / API-Fetcher: Cross-Origin GM_xmlhttpRequest / GM_setValue / Listener).
+   * Wichtig: Child-Scripts haben kein eigenes @connect – Aufrufe laufen über dieses
+   * Manager-Skript (@connect *). TM fragt einmal „Allow all domains?“ ab.
    */
   function installPageGmBridge() {
     try {
@@ -545,7 +548,7 @@
       if (typeof GM_addStyle === 'function') {
         uw.GM_addStyle = GM_addStyle;
       }
-      console.log('[TFN] GM-Bridge aktiv (Seitenkontext)');
+      console.log('[TFN] GM-Bridge aktiv (Seitenkontext, @connect *)');
     } catch (e) {
       console.warn('[TFN] GM-Bridge fehlgeschlagen', e);
     }
