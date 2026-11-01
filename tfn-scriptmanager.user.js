@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TFN-Scriptmanager
 // @namespace    https://tfn.tw/manager
-// @version      1.3.13
+// @version      1.3.16
 // @description  Bootstrap: Session→Katalog→Enable→Fetch+Eval (RAM). UI wie V27.5 inkl. HTML-Anleitungen und Multi-Kategorie-Tabs. Kein GitHub/PAT.
 // @author       Masklin
 // @match        https://www.leitstellenspiel.de/*
@@ -22,7 +22,7 @@
 (function () {
   'use strict';
 
-  const MANAGER_VERSION = '1.3.13';
+  const MANAGER_VERSION = '1.3.16';
   const API_BASE = 'https://tfn.tw/manager';
   const API_USE_QUERY_FALLBACK = false; // true → …/index.php?r=api/…
   const DB_NAME = 'BM-DB-TN-v2';
@@ -609,12 +609,61 @@
   const managerApi = {
     version: MANAGER_VERSION,
     get sessionToken() { return sessionToken; },
+    /** Server-Stufe aus session/start – für Child-Scripts (z. B. Mastermind Extended ≥ 10) */
+    get permissionLevel() { return permissionLevel; },
     getConfig: function (slugOrId) {
       if (typeof slugOrId === 'number') return getConfigFor(slugOrId);
       const s = catalog.find((c) => c.slug === slugOrId || Number(c.id) === Number(slugOrId));
       return s ? getConfigFor(s.id) : {};
     },
   };
+  /** Page-native Plain-Values (Sandbox-Getter auf managerApi sind aus unsafeWindow.eval oft tot). */
+  function publishPageGlobal(name, value, scriptId) {
+    const assign = (target) => {
+      if (!target) return;
+      try { target[name] = value; } catch (_) {}
+      try {
+        Object.defineProperty(target, name, {
+          value: value,
+          writable: true,
+          configurable: true,
+          enumerable: false,
+        });
+      } catch (_) {
+        try { target[name] = value; } catch (_) {}
+      }
+    };
+    try { assign(typeof unsafeWindow !== 'undefined' ? unsafeWindow : null); } catch (_) {}
+    try { assign(window); } catch (_) {}
+    try {
+      const doc = (typeof unsafeWindow !== 'undefined' && unsafeWindow.document)
+        ? unsafeWindow.document
+        : document;
+      let el = doc.getElementById(scriptId);
+      if (!el) {
+        el = doc.createElement('script');
+        el.id = scriptId;
+        el.type = 'text/javascript';
+        (doc.documentElement || doc.head || doc.body || doc).appendChild(el);
+      }
+      el.textContent = 'window.' + name + '=' + JSON.stringify(value) + ';';
+    } catch (_) {}
+  }
+
+  function publishPermissionLevelToPage(level) {
+    const n = Number(level);
+    const v = Number.isFinite(n) ? n : 0;
+    publishPageGlobal('__TFN_PERMISSION_LEVEL__', v, 'tfn-permission-level-boot');
+    try { localStorage.setItem('tfn_permission_level', String(v)); } catch (_) {}
+  }
+
+  function publishSessionTokenToPage(token) {
+    const t = token ? String(token) : '';
+    if (!t) return;
+    publishPageGlobal('__TFN_SESSION_TOKEN__', t, 'tfn-session-token-boot');
+    try { localStorage.setItem('tfn_session_token', t); } catch (_) {}
+  }
+
   function publishManagerApi() {
     try { window.TFNScriptManager = managerApi; } catch (_) {}
     try {
@@ -629,15 +678,18 @@
         unsafeWindow.BMScriptManager = managerApi;
       }
     } catch (_) {}
+    publishPermissionLevelToPage(permissionLevel);
+    if (sessionToken) publishSessionTokenToPage(sessionToken);
   }
   publishManagerApi();
 
   function publishSessionToPage(userId) {
     // Nur tfn_*-Keys – bm_session_token / bm_user_id / bm_killed dem alten B&M überlassen
     try {
-      if (sessionToken) localStorage.setItem('tfn_session_token', sessionToken);
       if (userId) localStorage.setItem('tfn_user_id', String(userId));
     } catch (_) {}
+    if (sessionToken) publishSessionTokenToPage(sessionToken);
+    publishPermissionLevelToPage(permissionLevel);
     publishManagerApi();
   }
 
@@ -1343,30 +1395,42 @@
    * Host ohne LSS-user_id (/tfn/*, Legacy fr-manager / verband/manager / tfn.tw/0, …):
    * Session aus GM/Hash → Katalog → matching Scripts (GM-Bridge + Eval).
    */
+  function readHostSessionCandidates() {
+    const out = [];
+    const push = (tok, source) => {
+      const t = tok ? String(tok).trim() : '';
+      if (!/^[a-f0-9]{64}$/i.test(t)) return;
+      if (out.some((x) => x.token === t)) return;
+      out.push({ token: t, source: source });
+    };
+    try {
+      const m = String(location.hash || '').match(/tfn_sess=([a-f0-9]{64})/i);
+      if (m) push(m[1], 'hash');
+    } catch (_) {}
+    try { push(localStorage.getItem('tfn_session_token'), 'ls'); } catch (_) {}
+    try { push(window.__TFN_SESSION_TOKEN__, 'page'); } catch (_) {}
+    try { push(GM_getValue(GM_SESSION_KEY, null), 'gm'); } catch (_) {}
+    return out;
+  }
+
   async function bootListHost() {
     migrateLegacyTfnGmKeys();
     installPageGmBridge();
     killed = false;
 
-    sessionToken = GM_getValue(GM_SESSION_KEY, null);
+    const candidates = readHostSessionCandidates();
     try {
       const m = String(location.hash || '').match(/tfn_sess=([a-f0-9]{64})/i);
-      if (m) {
-        sessionToken = m[1];
-        GM_setValue(GM_SESSION_KEY, sessionToken);
-        history.replaceState(null, '', location.pathname + location.search);
-      }
+      if (m) history.replaceState(null, '', location.pathname + location.search);
     } catch (_) {}
 
-    if (!sessionToken) {
+    if (!candidates.length) {
       bootStatus = 'error';
       bootMessage = 'Host-Seite ohne Session. Bitte zuerst normales LSS mit TFN-Scriptmanager öffnen (Session anlegen), dann diesen Tab neu laden.';
       console.warn('[TFN]', bootMessage);
       setHostVeilMessage(bootMessage);
       return;
     }
-
-    publishSessionToPage(GM_getValue('tfn_last_user_id', null));
 
     try {
       await openDb();
@@ -1380,14 +1444,35 @@
       prefs = [];
     }
 
-    try {
-      const cat = await api('GET', '/api/scripts/catalog');
-      catalog = (cat.scripts || []).map((s) => Object.assign({}, s, { id: Number(s.id) }));
-      categories = Array.isArray(cat.categories) ? cat.categories : [];
-    } catch (e) {
+    let catOk = false;
+    let lastErr = null;
+    for (const c of candidates) {
+      sessionToken = c.token;
+      try { GM_setValue(GM_SESSION_KEY, sessionToken); } catch (_) {}
+      publishSessionToPage(GM_getValue('tfn_last_user_id', null));
+      console.log('[TFN] Host-Auth Versuch source=' + c.source + ' token=' + c.token.slice(0, 8) + '…');
+      try {
+        const cat = await api('GET', '/api/scripts/catalog');
+        catalog = (cat.scripts || []).map((s) => Object.assign({}, s, { id: Number(s.id) }));
+        categories = Array.isArray(cat.categories) ? cat.categories : [];
+        catOk = true;
+        console.log('[TFN] Host-Katalog OK · authSource=' + c.source + ' · scripts=' + catalog.length);
+        break;
+      } catch (e) {
+        lastErr = e;
+        const code = (e && e.payload && e.payload.error) || '';
+        console.warn('[TFN] Host-Katalog fail source=' + c.source, code || e.message || e);
+        if (code !== 'unauthorized' && code !== 'session_expired' && e.status !== 401) {
+          break;
+        }
+      }
+    }
+
+    if (!catOk) {
       bootStatus = 'error';
-      bootMessage = 'Katalog auf Host-Seite fehlgeschlagen. ' + formatApiError(e);
-      console.warn('[TFN]', bootMessage, e);
+      bootMessage = 'Katalog auf Host-Seite fehlgeschlagen. ' + formatApiError(lastErr) +
+        ' Tipp: Hauptspiel-Tab neu laden, dann Liste erneut über das Profilmenü öffnen.';
+      console.warn('[TFN]', bootMessage, lastErr);
       setHostVeilMessage(bootMessage);
       return;
     }
@@ -1499,9 +1584,10 @@
     recoveredFromKill = wasKilled;
 
     sessionToken = session.session_token;
-    permissionLevel = lvl || 0;
+    permissionLevel = Number.isFinite(lvl) ? lvl : 0;
     if (sessionToken) GM_setValue(GM_SESSION_KEY, sessionToken);
     try { GM_setValue('tfn_last_user_id', session.user_id || user.user_id); } catch (_) {}
+    try { GM_setValue('tfn_last_permission_level', permissionLevel); } catch (_) {}
     publishSessionToPage(session.user_id || user.user_id);
     installPageGmBridge();
 
@@ -1536,6 +1622,10 @@
 
     bootStatus = 'ok';
     bootMessage = '';
+
+    // Stufe nochmals page-nativ publizieren (vor unsafeWindow.eval – Sandbox-Getter unzuverlässig)
+    publishPermissionLevelToPage(permissionLevel);
+    publishManagerApi();
 
     // Scripts sofort ausführen – unabhängig davon, ob UI geöffnet wird
     await fetchAndRunEnabled();
