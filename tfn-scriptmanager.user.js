@@ -3,7 +3,7 @@
 // @namespace    https://tfn.tw/manager
 // @version      1.3.20
 // @description  Bootstrap: Session→Katalog→Enable→Fetch+Eval (RAM). UI wie V27.5 inkl. HTML-Anleitungen und Multi-Kategorie-Tabs. Kein GitHub/PAT.
-// @author       TFN / Jörg Leidig
+// @author       Masklin
 // @match        https://www.leitstellenspiel.de/*
 // @match        https://leitstellenspiel.de/*
 // @match        https://tfn.tw/0
