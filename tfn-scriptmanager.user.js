@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TFN-Scriptmanager
 // @namespace    https://tfn.tw/manager
-// @version      1.3.12
+// @version      1.3.13
 // @description  Bootstrap: Session→Katalog→Enable→Fetch+Eval (RAM). UI wie V27.5 inkl. HTML-Anleitungen und Multi-Kategorie-Tabs. Kein GitHub/PAT.
 // @author       Masklin
 // @match        https://www.leitstellenspiel.de/*
@@ -22,17 +22,38 @@
 (function () {
   'use strict';
 
-  const MANAGER_VERSION = '1.3.12';
+  const MANAGER_VERSION = '1.3.13';
   const API_BASE = 'https://tfn.tw/manager';
   const API_USE_QUERY_FALLBACK = false; // true → …/index.php?r=api/…
   const DB_NAME = 'BM-DB-TN-v2';
   const DB_VERSION = 1;
-  const GM_SYNC_KEY = 'bm_sync_enabled';
-  const GM_SESSION_KEY = 'bm_session_token';
-  const GM_KILLED_KEY = 'bm_client_killed';
-  /** localStorage-Keys die Kill/Session betreffen (Seite) */
-  const LS_KILL_KEYS = ['bm_killed', 'bm_session_token', 'bm_user_id'];
+  const GM_SYNC_KEY = 'tfn_sync_enabled';
+  const GM_SESSION_KEY = 'tfn_session_token';
+  const GM_KILLED_KEY = 'tfn_client_killed';
+  /** localStorage-Keys die Kill/Session betreffen (Seite) – nie bm_* (alter B&M parallel) */
+  const LS_KILL_KEYS = ['tfn_killed', 'tfn_session_token', 'tfn_user_id'];
   const HEARTBEAT_MS = 60000;
+
+  /** Einmalig GM-Keys von ≤1.3.12 (bm_*) → tfn_* innerhalb DIESES Userscripts. Page-LS bm_* unberührt. */
+  function migrateLegacyTfnGmKeys() {
+    const pairs = [
+      ['bm_session_token', GM_SESSION_KEY],
+      ['bm_sync_enabled', GM_SYNC_KEY],
+      ['bm_client_killed', GM_KILLED_KEY],
+      ['bm_last_display_name', 'tfn_last_display_name'],
+      ['bm_last_user_id', 'tfn_last_user_id'],
+    ];
+    pairs.forEach(([from, to]) => {
+      try {
+        const cur = GM_getValue(to, null);
+        if (cur != null && cur !== '') return;
+        const old = GM_getValue(from, null);
+        if (old == null || old === '') return;
+        GM_setValue(to, old);
+        try { GM_deleteValue(from); } catch (_) {}
+      } catch (_) {}
+    });
+  }
 
   /**
    * Seiten ohne LSS-user_id → Session-Host (Tool-Popups).
@@ -170,7 +191,7 @@
     }
     if (!name) {
       try {
-        const cached = GM_getValue('bm_last_display_name', '');
+        const cached = GM_getValue('tfn_last_display_name', '');
         if (cached) pickName(cached);
       } catch (_) {}
     }
@@ -320,8 +341,8 @@
    * - Server: users.permission_level = −1 und/oder system_state.mode = 'kill'
    *   (entscheidet session/start → action=kill)
    * - Client (nur UI/Prefs wipe, blockiert Boot NICHT dauerhaft wenn Server wieder ok):
-   *   GM: bm_client_killed, bm_session_token (+ idbClearAll löscht ALLE GM_*-Keys dieses Scripts)
-   *   localStorage: bm_killed, bm_session_token, bm_user_id
+   *   GM: tfn_client_killed, tfn_session_token (+ idbClearAll löscht ALLE GM_*-Keys dieses Scripts)
+   *   localStorage: tfn_killed, tfn_session_token, tfn_user_id (nie bm_* – B&M parallel)
    *   IndexedDB: BM-DB-TN-v2 (ObjectStore prefs) – wird gelöscht
    *   RAM: Variable killed
    */
@@ -329,9 +350,9 @@
     let gm = false;
     try { gm = !!GM_getValue(GM_KILLED_KEY); } catch (_) {}
     let ls = false;
-    try { ls = localStorage.getItem('bm_killed') === '1'; } catch (_) {}
+    try { ls = localStorage.getItem('tfn_killed') === '1'; } catch (_) {}
     let ss = false;
-    try { ss = sessionStorage.getItem('bm_killed') === '1'; } catch (_) {}
+    try { ss = sessionStorage.getItem('tfn_killed') === '1'; } catch (_) {}
     return gm || ls || ss || killed;
   }
 
@@ -343,8 +364,8 @@
       LS_KILL_KEYS.forEach((k) => localStorage.removeItem(k));
     } catch (_) {}
     try {
-      sessionStorage.removeItem('bm_killed');
-      sessionStorage.removeItem('bm_session_token');
+      sessionStorage.removeItem('tfn_killed');
+      sessionStorage.removeItem('tfn_session_token');
     } catch (_) {}
   }
 
@@ -373,19 +394,19 @@
     try { GM_setValue(GM_KILLED_KEY, true); } catch (_) {}
     try { GM_deleteValue(GM_SESSION_KEY); } catch (_) {}
     clearPageSessionArtifacts();
-    try { localStorage.setItem('bm_killed', '1'); } catch (_) {}
+    try { localStorage.setItem('tfn_killed', '1'); } catch (_) {}
     await idbClearAll();
     // Nach idbClearAll sind GM-Values weg – Kill-Marker erneut setzen
     try { GM_setValue(GM_KILLED_KEY, true); } catch (_) {}
-    try { localStorage.setItem('bm_killed', '1'); } catch (_) {}
+    try { localStorage.setItem('tfn_killed', '1'); } catch (_) {}
 
-    const link = document.getElementById('b-m-scriptmanager-link');
+    const link = document.getElementById('tfn-scriptmanager-link');
     if (link) {
       const li = link.closest('li');
       if (li) li.remove();
       else link.remove();
     }
-    const container = document.getElementById('lss-script-manager-container');
+    const container = document.getElementById('tfn-script-manager-container');
     if (container) container.remove();
     managerUiCreated = false;
     console.warn('[TFN] Kill-Switch (Server sagte kill/level<0):', reason || 'gesperrt');
@@ -583,7 +604,8 @@
     }
   }
 
-  // Manager-API auch auf der Seite sichtbar (für Script-Configs)
+  // Manager-API auf der Seite (TFN-only). BMScriptManager nur setzen wenn frei –
+  // alten B&M-Manager nicht überschreiben (Parallelbetrieb).
   const managerApi = {
     version: MANAGER_VERSION,
     get sessionToken() { return sessionToken; },
@@ -593,21 +615,30 @@
       return s ? getConfigFor(s.id) : {};
     },
   };
-  window.BMScriptManager = managerApi;
-  try {
-    if (typeof unsafeWindow !== 'undefined') unsafeWindow.BMScriptManager = managerApi;
-  } catch (_) {}
-
-  function publishSessionToPage(userId) {
+  function publishManagerApi() {
+    try { window.TFNScriptManager = managerApi; } catch (_) {}
     try {
-      if (sessionToken) localStorage.setItem('bm_session_token', sessionToken);
-      if (userId) localStorage.setItem('bm_user_id', String(userId));
+      if (typeof unsafeWindow !== 'undefined') unsafeWindow.TFNScriptManager = managerApi;
+    } catch (_) {}
+    // Compat für TFN-Content: nur wenn B&M den Namen noch nicht belegt
+    try {
+      if (typeof window.BMScriptManager === 'undefined') window.BMScriptManager = managerApi;
     } catch (_) {}
     try {
-      if (typeof unsafeWindow !== 'undefined') {
+      if (typeof unsafeWindow !== 'undefined' && typeof unsafeWindow.BMScriptManager === 'undefined') {
         unsafeWindow.BMScriptManager = managerApi;
       }
     } catch (_) {}
+  }
+  publishManagerApi();
+
+  function publishSessionToPage(userId) {
+    // Nur tfn_*-Keys – bm_session_token / bm_user_id / bm_killed dem alten B&M überlassen
+    try {
+      if (sessionToken) localStorage.setItem('tfn_session_token', sessionToken);
+      if (userId) localStorage.setItem('tfn_user_id', String(userId));
+    } catch (_) {}
+    publishManagerApi();
   }
 
   async function fetchAndRunEnabled() {
@@ -750,7 +781,7 @@
   // UI – Look/Feel wie V27.5, Einstieg über Profilmenü
   // -------------------------------------------------------------------------
   function ensureStyles() {
-    if (document.getElementById('bm-mvp-styles')) return;
+    if (document.getElementById('tfn-mvp-styles')) return;
     GM_addStyle(`
       :root {
         --bm-bg-dark: #1e2126;
@@ -769,7 +800,7 @@
         --bm-input-bg: #f0f2f5;
       }
 
-      #lss-script-manager-container {
+      #tfn-script-manager-container {
         font-family: var(--bm-font); color: var(--bm-text-main); font-size: 14px;
         position: fixed; top: 8vh; left: 50%; transform: translateX(-50%); z-index: 10000;
         background-color: var(--bm-bg-dark); border: 1px solid var(--bm-border-color);
@@ -777,72 +808,72 @@
         display: none; flex-direction: column; box-sizing: border-box;
         box-shadow: 0 10px 30px rgba(0,0,0,0.5); overflow: hidden;
       }
-      #lss-script-manager-container.visible { display: flex; }
+      #tfn-script-manager-container.visible { display: flex; }
 
-      #lss-script-manager-container .bm-manager-header {
+      #tfn-script-manager-container .bm-manager-header {
         flex-shrink: 0; padding: 20px 20px 0 20px; background-color: var(--bm-bg-dark);
         border-bottom: 1px solid var(--bm-border-color); z-index: 20; position: relative;
       }
-      #lss-script-manager-container .bm-manager-body {
+      #tfn-script-manager-container .bm-manager-body {
         flex-grow: 1; overflow-y: auto; padding: 20px; background: rgba(0,0,0,0.1);
       }
-      #lss-script-manager-container .bm-manager-footer {
+      #tfn-script-manager-container .bm-manager-footer {
         flex-shrink: 0; padding: 15px 20px; background-color: var(--bm-bg-dark);
         border-top: 1px solid var(--bm-border-color);
       }
-      #lss-script-manager-container .bm-manager-body::-webkit-scrollbar { width: 8px; }
-      #lss-script-manager-container .bm-manager-body::-webkit-scrollbar-thumb {
+      #tfn-script-manager-container .bm-manager-body::-webkit-scrollbar { width: 8px; }
+      #tfn-script-manager-container .bm-manager-body::-webkit-scrollbar-thumb {
         background-color: var(--bm-border-color); border-radius: 4px;
       }
 
-      #lss-script-manager-container h3 {
+      #tfn-script-manager-container h3 {
         text-align: center; border-bottom: 2px solid var(--bm-primary-blue);
         padding-bottom: 12px; margin: 0 0 20px 0; font-weight: 300; font-size: 1.8em; letter-spacing: 1px;
       }
-      #lss-script-manager-container .bm-level-chip {
+      #tfn-script-manager-container .bm-level-chip {
         display: inline-block; margin-left: 10px; padding: 2px 8px; vertical-align: middle;
         font-size: 0.45em; font-weight: 500; letter-spacing: 0.02em;
         color: var(--bm-text-muted); background: #2a3038; border: 1px solid #3d4554;
         border-radius: 4px; opacity: 0.85;
       }
-      #lss-script-manager-container .bm-toolbar {
+      #tfn-script-manager-container .bm-toolbar {
         display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; gap: 15px; flex-wrap: wrap;
       }
-      #lss-script-manager-container #bm-script-filter {
+      #tfn-script-manager-container #tfn-script-filter {
         background-color: var(--bm-input-bg); color: #222; border: 1px solid #999;
         border-radius: 6px; padding: 8px 12px; font-size: 1em; width: 300px; max-width: 100%;
       }
-      #lss-script-manager-container .bm-toolbar-right { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
-      #lss-script-manager-container .bm-actions { display: flex; gap: 14px; align-items: center; }
-      #lss-script-manager-container .bm-actions span,
-      #lss-script-manager-container .bm-actions label {
+      #tfn-script-manager-container .bm-toolbar-right { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+      #tfn-script-manager-container .bm-actions { display: flex; gap: 14px; align-items: center; }
+      #tfn-script-manager-container .bm-actions span,
+      #tfn-script-manager-container .bm-actions label {
         font-size: 1.05em; cursor: pointer; color: var(--bm-text-muted); user-select: none;
       }
-      #lss-script-manager-container .bm-actions span:hover { color: var(--bm-text-main); }
-      #lss-script-manager-container #bm-stats-bar { color: var(--bm-text-muted); font-size: 0.95em; }
+      #tfn-script-manager-container .bm-actions span:hover { color: var(--bm-text-main); }
+      #tfn-script-manager-container #tfn-stats-bar { color: var(--bm-text-muted); font-size: 0.95em; }
 
-      #lss-script-manager-container #bm-tabs-area { margin: 0 0 12px 0; }
-      #lss-script-manager-container .bm-tabs {
+      #tfn-script-manager-container #tfn-tabs-area { margin: 0 0 12px 0; }
+      #tfn-script-manager-container .bm-tabs {
         display: flex; flex-wrap: nowrap; width: 100%; gap: 2px; overflow-x: auto;
       }
-      #lss-script-manager-container .bm-tab {
+      #tfn-script-manager-container .bm-tab {
         flex: 1; min-width: 0; padding: 10px 6px; background: #333; color: #aaa; cursor: pointer;
         border-radius: 5px 5px 0 0; font-weight: 500; text-align: center;
         border: 1px solid #444; border-bottom: none;
         overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
       }
-      #lss-script-manager-container .bm-tab:hover { color: #eee; }
-      #lss-script-manager-container .bm-tab.active {
+      #tfn-script-manager-container .bm-tab:hover { color: #eee; }
+      #tfn-script-manager-container .bm-tab.active {
         flex-grow: 3; background-color: var(--bm-primary-blue) !important; color: white !important; font-weight: bold;
       }
 
-      #lss-script-manager-container .bm-category-grid {
+      #tfn-script-manager-container .bm-category-grid {
         display: grid;
         grid-template-columns: repeat(auto-fill, 200px);
         grid-auto-rows: 118px;
         gap: 12px; padding-bottom: 10px; align-items: stretch; justify-content: start;
       }
-      #lss-script-manager-container .script-button {
+      #tfn-script-manager-container .script-button {
         padding: 12px 12px 28px 12px; border-radius: 6px; cursor: pointer; position: relative;
         background: var(--bm-bg-panel); text-align: center;
         width: 200px; height: 118px; min-width: 200px; max-width: 200px;
@@ -851,18 +882,18 @@
         transition: transform 0.2s, box-shadow 0.2s; border: 1px solid transparent;
         box-shadow: 0 2px 4px rgba(0,0,0,0.2); overflow: hidden;
       }
-      #lss-script-manager-container .script-button:hover { transform: translateY(-3px); box-shadow: var(--bm-shadow-soft); z-index: 10; }
-      #lss-script-manager-container .script-button.active { background: var(--bm-primary-blue); color: white; border: none; }
-      #lss-script-manager-container .script-button.inactive { background: #343a40; color: #aaa; border: 1px solid var(--bm-border-color); opacity: 0.9; }
-      #lss-script-manager-container .script-button .bm-script-title {
+      #tfn-script-manager-container .script-button:hover { transform: translateY(-3px); box-shadow: var(--bm-shadow-soft); z-index: 10; }
+      #tfn-script-manager-container .script-button.active { background: var(--bm-primary-blue); color: white; border: none; }
+      #tfn-script-manager-container .script-button.inactive { background: #343a40; color: #aaa; border: 1px solid var(--bm-border-color); opacity: 0.9; }
+      #tfn-script-manager-container .script-button .bm-script-title {
         font-size: 1em; line-height: 1.25; max-width: 100%;
         display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
         overflow: hidden; word-break: break-word;
       }
-      #lss-script-manager-container .script-button .version {
+      #tfn-script-manager-container .script-button .version {
         font-size: 0.85em; margin-top: 6px; opacity: 0.9; flex-shrink: 0;
       }
-      #lss-script-manager-container .script-button .bm-tile-footer {
+      #tfn-script-manager-container .script-button .bm-tile-footer {
         position: absolute; left: 0; right: 0; bottom: 0;
         height: 22px; padding: 0 28px 0 10px; text-align: left;
         display: flex; align-items: center;
@@ -870,68 +901,68 @@
         opacity: 0.55; border-top: 1px solid rgba(255,255,255,0.12);
         background: rgba(0,0,0,0.22); line-height: 1; box-sizing: border-box;
       }
-      #lss-script-manager-container .script-button.inactive .bm-tile-footer {
+      #tfn-script-manager-container .script-button.inactive .bm-tile-footer {
         border-top-color: rgba(255,255,255,0.08); background: rgba(0,0,0,0.28);
       }
 
-      #lss-script-manager-container #save-scripts-button {
+      #tfn-script-manager-container #tfn-save-scripts-button {
         width: 100%; padding: 14px; font-weight: bold; color: white;
         background-color: var(--bm-primary-blue); border: none; border-radius: 6px;
         cursor: pointer; font-size: 1.1em;
       }
-      #lss-script-manager-container #save-scripts-button:hover { background-color: var(--bm-primary-blue-hover); }
-      #lss-script-manager-container #save-scripts-button[disabled] { opacity: 0.45; cursor: default; }
+      #tfn-script-manager-container #tfn-save-scripts-button:hover { background-color: var(--bm-primary-blue-hover); }
+      #tfn-script-manager-container #tfn-save-scripts-button[disabled] { opacity: 0.45; cursor: default; }
 
-      #lss-script-manager-container .bm-close-btn {
+      #tfn-script-manager-container .bm-close-btn {
         position: absolute; top: 15px; right: 20px; font-size: 24px; cursor: pointer; color: var(--bm-text-muted);
       }
-      #lss-script-manager-container .bm-banner {
+      #tfn-script-manager-container .bm-banner {
         background: #422006; color: #fde68a; border: 1px solid #a16207;
         border-radius: 6px; padding: 12px; margin-bottom: 12px;
       }
-      #lss-script-manager-container .bm-loader-container {
+      #tfn-script-manager-container .bm-loader-container {
         padding: 40px; text-align: center; color: var(--bm-text-muted); grid-column: 1 / -1;
       }
 
-      #lss-script-manager-container .bm-manual-btn {
+      #tfn-script-manager-container .bm-manual-btn {
         position: absolute; bottom: 3px; right: 6px; font-size: 1em; opacity: 0.7;
         cursor: pointer; z-index: 2; line-height: 1; padding: 2px 4px;
       }
-      #lss-script-manager-container .bm-manual-btn:hover { opacity: 1; transform: scale(1.15); }
-      #lss-script-manager-container .script-button.active .bm-manual-btn { filter: drop-shadow(0 0 1px #000); }
+      #tfn-script-manager-container .bm-manual-btn:hover { opacity: 1; transform: scale(1.15); }
+      #tfn-script-manager-container .script-button.active .bm-manual-btn { filter: drop-shadow(0 0 1px #000); }
 
-      #bm-manual-modal {
+      #tfn-manual-modal {
         display: none; position: fixed; inset: 0; z-index: 10006;
         background: rgba(0,0,0,0.55); align-items: center; justify-content: center;
         font-family: var(--bm-font, sans-serif);
       }
-      #bm-manual-modal.visible { display: flex; }
-      #bm-manual-modal .bm-manual-panel {
+      #tfn-manual-modal.visible { display: flex; }
+      #tfn-manual-modal .bm-manual-panel {
         width: 90%; max-width: 900px; height: 85vh; background: #2c313a; color: #eee;
         border: 1px solid #444c5e; border-radius: 8px; display: flex; flex-direction: column;
         box-shadow: 0 10px 30px rgba(0,0,0,0.5); overflow: hidden;
       }
-      #bm-manual-modal .bm-manual-header {
+      #tfn-manual-modal .bm-manual-header {
         padding: 14px 18px; border-bottom: 1px solid #444c5e; font-size: 1.15em; font-weight: 600;
       }
-      #bm-manual-modal #bm-manual-body {
+      #tfn-manual-modal #tfn-manual-body {
         flex: 1; overflow-y: auto; padding: 0; background: #fff; color: #222;
       }
-      #bm-manual-modal .bm-manual-footer {
+      #tfn-manual-modal .bm-manual-footer {
         padding: 12px 18px; border-top: 1px solid #444c5e; text-align: right;
       }
-      #bm-manual-modal .bm-manual-footer button {
+      #tfn-manual-modal .bm-manual-footer button {
         padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer;
         background: #5a6268; color: #fff; font-weight: 600;
       }
 
-      #b-m-scriptmanager-link.bm-update-highlight,
+      #tfn-scriptmanager-link.bm-update-highlight,
       #menu_profile.bm-update-highlight {
         background-color: var(--bm-primary-blue) !important; color: #ffffff !important; border-radius: 4px;
       }
     `);
     const marker = document.createElement('meta');
-    marker.id = 'bm-mvp-styles';
+    marker.id = 'tfn-mvp-styles';
     (document.head || document.documentElement).appendChild(marker);
   }
 
@@ -939,30 +970,30 @@
     if (managerUiCreated) return;
     ensureStyles();
     const div = document.createElement('div');
-    div.id = 'lss-script-manager-container';
+    div.id = 'tfn-script-manager-container';
     div.innerHTML = `
       <div class="bm-manager-header">
         <span class="bm-close-btn" title="Schließen">&times;</span>
-        <h3>TFN-Scriptmanager <span class="bm-level-chip" id="bm-level-label" title="Berechtigungsstufe">Stufe ?</span></h3>
+        <h3>TFN-Scriptmanager <span class="bm-level-chip" id="tfn-level-label" title="Berechtigungsstufe">Stufe ?</span></h3>
         <div class="bm-toolbar">
-          <input type="text" id="bm-script-filter" placeholder="Suche...">
+          <input type="text" id="tfn-script-filter" placeholder="Suche...">
           <div class="bm-toolbar-right">
-            <div id="bm-stats-bar">…</div>
+            <div id="tfn-stats-bar">…</div>
             <div class="bm-actions">
-              <label title="Config-Sync zum Server"><input type="checkbox" id="bm-sync-toggle" ${syncEnabled ? 'checked' : ''}/> Sync</label>
-              <span id="bm-manager-manual-btn" title="Manager-Anleitung">📖</span>
-              <span id="bm-refresh-btn" title="Katalog neu laden">🔄</span>
+              <label title="Config-Sync zum Server"><input type="checkbox" id="tfn-sync-toggle" ${syncEnabled ? 'checked' : ''}/> Sync</label>
+              <span id="tfn-manager-manual-btn" title="Manager-Anleitung">📖</span>
+              <span id="tfn-refresh-btn" title="Katalog neu laden">🔄</span>
             </div>
           </div>
         </div>
       </div>
       <div class="bm-manager-body">
-        <div id="bm-status-banner"></div>
-        <div id="bm-tabs-area"></div>
-        <div id="bm-grid-area" class="bm-category-grid"></div>
+        <div id="tfn-status-banner"></div>
+        <div id="tfn-tabs-area"></div>
+        <div id="tfn-grid-area" class="bm-category-grid"></div>
       </div>
       <div class="bm-manager-footer">
-        <button type="button" id="save-scripts-button">Änderungen anwenden</button>
+        <button type="button" id="tfn-save-scripts-button">Änderungen anwenden</button>
         <div style="text-align:right;font-size:0.7em;color:var(--bm-text-muted);margin-top:5px;opacity:0.6;">
           v${MANAGER_VERSION} · ${escapeHtml(API_BASE)}
         </div>
@@ -978,15 +1009,15 @@
       }
       div.classList.remove('visible');
     };
-    document.getElementById('bm-refresh-btn').onclick = () => reloadCatalogIntoUI();
-    document.getElementById('bm-manager-manual-btn').onclick = () => {
+    document.getElementById('tfn-refresh-btn').onclick = () => reloadCatalogIntoUI();
+    document.getElementById('tfn-manager-manual-btn').onclick = () => {
       showManualUI('TFN-Scriptmanager', MANAGER_MANUAL_HTML);
     };
-    document.getElementById('bm-script-filter').addEventListener('input', (e) => {
+    document.getElementById('tfn-script-filter').addEventListener('input', (e) => {
       filterText = (e.target.value || '').toLowerCase();
       renderGrid();
     });
-    document.getElementById('bm-sync-toggle').addEventListener('change', (e) => {
+    document.getElementById('tfn-sync-toggle').addEventListener('change', (e) => {
       syncEnabled = !!e.target.checked;
       GM_setValue(GM_SYNC_KEY, syncEnabled);
       if (syncEnabled) {
@@ -996,7 +1027,7 @@
         });
       }
     });
-    document.getElementById('save-scripts-button').addEventListener('click', () => applyChanges());
+    document.getElementById('tfn-save-scripts-button').addEventListener('click', () => applyChanges());
 
     managerUiCreated = true;
   }
@@ -1005,31 +1036,31 @@
   const manualCache = {};
 
   function ensureManualModal() {
-    let modal = document.getElementById('bm-manual-modal');
+    let modal = document.getElementById('tfn-manual-modal');
     if (modal) return modal;
     ensureStyles();
     modal = document.createElement('div');
-    modal.id = 'bm-manual-modal';
+    modal.id = 'tfn-manual-modal';
     modal.innerHTML = `
       <div class="bm-manual-panel">
         <div class="bm-manual-header">📖 Anleitung</div>
-        <div id="bm-manual-body">Lade Inhalt…</div>
+        <div id="tfn-manual-body">Lade Inhalt…</div>
         <div class="bm-manual-footer">
-          <button type="button" id="bm-manual-close">Schließen</button>
+          <button type="button" id="tfn-manual-close">Schließen</button>
         </div>
       </div>`;
     document.body.appendChild(modal);
     modal.addEventListener('click', (e) => {
       if (e.target === modal) modal.classList.remove('visible');
     });
-    document.getElementById('bm-manual-close').onclick = () => modal.classList.remove('visible');
+    document.getElementById('tfn-manual-close').onclick = () => modal.classList.remove('visible');
     return modal;
   }
 
   function showManualUI(scriptName, htmlContent) {
     const modal = ensureManualModal();
     modal.querySelector('.bm-manual-header').textContent = '📖 Anleitung: ' + scriptName;
-    document.getElementById('bm-manual-body').innerHTML = htmlContent || '<p style="padding:16px;">Keine Anleitung.</p>';
+    document.getElementById('tfn-manual-body').innerHTML = htmlContent || '<p style="padding:16px;">Keine Anleitung.</p>';
     modal.classList.add('visible');
   }
 
@@ -1076,7 +1107,7 @@
   }
 
   function renderCategoryTabs(visibleItems) {
-    const tabsArea = document.getElementById('bm-tabs-area');
+    const tabsArea = document.getElementById('tfn-tabs-area');
     if (!tabsArea) return;
     tabsArea.innerHTML = '';
     const counts = {};
@@ -1143,11 +1174,11 @@
   }
 
   function renderGrid() {
-    const grid = document.getElementById('bm-grid-area');
-    const banner = document.getElementById('bm-status-banner');
-    const stats = document.getElementById('bm-stats-bar');
-    const levelLabel = document.getElementById('bm-level-label');
-    const saveBtn = document.getElementById('save-scripts-button');
+    const grid = document.getElementById('tfn-grid-area');
+    const banner = document.getElementById('tfn-status-banner');
+    const stats = document.getElementById('tfn-stats-bar');
+    const levelLabel = document.getElementById('tfn-level-label');
+    const saveBtn = document.getElementById('tfn-save-scripts-button');
     if (!grid) return;
 
     if (levelLabel) levelLabel.textContent = 'Stufe ' + String(permissionLevel);
@@ -1231,7 +1262,7 @@
   }
 
   function updateSaveVisibility() {
-    const saveBtn = document.getElementById('save-scripts-button');
+    const saveBtn = document.getElementById('tfn-save-scripts-button');
     if (!saveBtn) return;
     saveBtn.style.display = hasDraftChanges() ? 'block' : 'none';
   }
@@ -1250,13 +1281,13 @@
     }
     await pushServerPrefs();
     // Reload wie V27.5 – Boot holt Content und führt im Seitenkontext aus
-    const container = document.getElementById('lss-script-manager-container');
+    const container = document.getElementById('tfn-script-manager-container');
     if (container) container.classList.remove('visible');
     location.reload();
   }
 
   async function reloadCatalogIntoUI() {
-    const grid = document.getElementById('bm-grid-area');
+    const grid = document.getElementById('tfn-grid-area');
     if (grid) grid.innerHTML = '<div class="bm-loader-container">Lade Katalog…</div>';
     try {
       const cat = await api('GET', '/api/scripts/catalog');
@@ -1273,7 +1304,7 @@
 
   function openManager() {
     createManagerUI();
-    const container = document.getElementById('lss-script-manager-container');
+    const container = document.getElementById('tfn-script-manager-container');
     if (!container) return;
     container.classList.add('visible');
     renderGrid();
@@ -1283,15 +1314,18 @@
     ensureStyles();
     const tryInsert = () => {
       if (killed) return true;
-      if (document.getElementById('b-m-scriptmanager-link')) return true;
+      // Nur eigenes TFN-Menü prüfen – #b-m-scriptmanager-link (alter B&M) unberührt lassen
+      if (document.getElementById('tfn-scriptmanager-link')) return true;
       const settingsLink = document.querySelector('a[href="/settings/index"]');
       const userMenu = settingsLink && settingsLink.parentNode;
       if (!userMenu || !userMenu.parentNode) return false;
 
       const li = document.createElement('li');
-      li.innerHTML = `<a href="#" id="b-m-scriptmanager-link"><img class="icon icons8-Settings" src="/images/icons8-settings.svg" width="24" height="24"> TFN-Scriptmanager</a>`;
+      li.setAttribute('data-tfn-menu', '1');
+      li.innerHTML = `<a href="#" id="tfn-scriptmanager-link"><img class="icon icons8-Settings" src="/images/icons8-settings.svg" width="24" height="24"> TFN-Scriptmanager</a>`;
+      // Neben Einstellungen einfügen; vorhandenes B&M-Menü (#b-m-scriptmanager-link) nicht ersetzen
       userMenu.parentNode.insertBefore(li, userMenu.nextSibling);
-      document.getElementById('b-m-scriptmanager-link').addEventListener('click', (e) => {
+      document.getElementById('tfn-scriptmanager-link').addEventListener('click', (e) => {
         e.preventDefault();
         openManager();
       });
@@ -1310,6 +1344,7 @@
    * Session aus GM/Hash → Katalog → matching Scripts (GM-Bridge + Eval).
    */
   async function bootListHost() {
+    migrateLegacyTfnGmKeys();
     installPageGmBridge();
     killed = false;
 
@@ -1331,7 +1366,7 @@
       return;
     }
 
-    publishSessionToPage(GM_getValue('bm_last_user_id', null));
+    publishSessionToPage(GM_getValue('tfn_last_user_id', null));
 
     try {
       await openDb();
@@ -1393,6 +1428,7 @@
   // Boot – session/start sofort beim Seitenladen (Auto-Create User), UI nur Menü
   // -------------------------------------------------------------------------
   async function boot() {
+    migrateLegacyTfnGmKeys();
     const user = readPageUser();
     if (!user.user_id) {
       if (isSessionHostPage()) {
@@ -1435,9 +1471,9 @@
     const action = session.action || session.mode;
     const lvl = Number(session.permission_level);
     if (session.display_name) {
-      try { GM_setValue('bm_last_display_name', String(session.display_name).slice(0, 128)); } catch (_) {}
+      try { GM_setValue('tfn_last_display_name', String(session.display_name).slice(0, 128)); } catch (_) {}
     } else if (user.display_name) {
-      try { GM_setValue('bm_last_display_name', user.display_name); } catch (_) {}
+      try { GM_setValue('tfn_last_display_name', user.display_name); } catch (_) {}
     }
     console.log('[TFN] session/start →', {
       action: action,
@@ -1465,7 +1501,7 @@
     sessionToken = session.session_token;
     permissionLevel = lvl || 0;
     if (sessionToken) GM_setValue(GM_SESSION_KEY, sessionToken);
-    try { GM_setValue('bm_last_user_id', session.user_id || user.user_id); } catch (_) {}
+    try { GM_setValue('tfn_last_user_id', session.user_id || user.user_id); } catch (_) {}
     publishSessionToPage(session.user_id || user.user_id);
     installPageGmBridge();
 
