@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         TFN-Scriptmanager
 // @namespace    https://tfn.tw/manager
-// @version      1.3.16
+// @version      1.3.20
 // @description  Bootstrap: Session→Katalog→Enable→Fetch+Eval (RAM). UI wie V27.5 inkl. HTML-Anleitungen und Multi-Kategorie-Tabs. Kein GitHub/PAT.
-// @author       Masklin
+// @author       TFN / Jörg Leidig
 // @match        https://www.leitstellenspiel.de/*
 // @match        https://leitstellenspiel.de/*
 // @match        https://tfn.tw/0
@@ -22,17 +22,26 @@
 (function () {
   'use strict';
 
-  const MANAGER_VERSION = '1.3.16';
+  const MANAGER_VERSION = '1.3.20';
   const API_BASE = 'https://tfn.tw/manager';
   const API_USE_QUERY_FALLBACK = false; // true → …/index.php?r=api/…
   const DB_NAME = 'BM-DB-TN-v2';
-  const DB_VERSION = 1;
+  const DB_VERSION = 2; // v2: codeCache (Content über Navigation)
+  const IDB_OPEN_TIMEOUT_MS = 3000;
+  const CODE_CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6h, Version-Mismatch invalidiert früher
+  const CONTENT_FETCH_GAP_MS = 40;
+  const RATE_LIMIT_RETRY_MS = 1600;
   const GM_SYNC_KEY = 'tfn_sync_enabled';
   const GM_SESSION_KEY = 'tfn_session_token';
   const GM_KILLED_KEY = 'tfn_client_killed';
   /** localStorage-Keys die Kill/Session betreffen (Seite) – nie bm_* (alter B&M parallel) */
   const LS_KILL_KEYS = ['tfn_killed', 'tfn_session_token', 'tfn_user_id'];
   const HEARTBEAT_MS = 60000;
+
+  // Sofort sichtbar – darf nicht hinter openDb/IDB-Upgrade hängen
+  try {
+    console.log('[TFN] boot · v' + MANAGER_VERSION + ' ·', String(location.pathname || ''));
+  } catch (_) {}
 
   /** Einmalig GM-Keys von ≤1.3.12 (bm_*) → tfn_* innerhalb DIESES Userscripts. Page-LS bm_* unberührt. */
   function migrateLegacyTfnGmKeys() {
@@ -141,6 +150,9 @@
   let prefs = [];
   /** Draft-Enable vor „Änderungen anwenden“ (scriptId → bool) */
   let draftEnabled = {};
+  /** Einmal-Warnungen für invalid_content / stale Prefs (scriptId) */
+  const invalidContentWarned = new Set();
+  const stalePrefWarned = new Set();
   let sessionToken = null;
   let permissionLevel = 0;
   let syncEnabled = GM_getValue(GM_SYNC_KEY, true);
@@ -204,23 +216,113 @@
   }
 
   // -------------------------------------------------------------------------
-  // IndexedDB – nur prefs (enable + config), KEIN Quellcode
+  // IndexedDB – prefs + codeCache (Content, versioniert)
+  // openDb darf session/start NIE blockieren: Timeout + onblocked.
   // -------------------------------------------------------------------------
   function openDb() {
     return new Promise((resolve, reject) => {
-      const req = indexedDB.open(DB_NAME, DB_VERSION);
-      req.onupgradeneeded = (ev) => {
-        const database = ev.target.result;
-        if (!database.objectStoreNames.contains('prefs')) {
-          database.createObjectStore('prefs', { keyPath: 'scriptId' });
+      let settled = false;
+      const finish = (err, database) => {
+        if (settled) return;
+        settled = true;
+        try { clearTimeout(timer); } catch (_) {}
+        if (err) {
+          db = null;
+          reject(err);
+        } else {
+          db = database || null;
+          resolve(db);
         }
       };
-      req.onsuccess = (ev) => {
-        db = ev.target.result;
-        resolve(db);
+
+      const timer = setTimeout(() => {
+        console.warn(
+          '[TFN] IndexedDB open Timeout (' + IDB_OPEN_TIMEOUT_MS +
+            'ms) – fahre ohne IDB fort (andere Tabs halten evtl. alte DB-Version).'
+        );
+        finish(new Error('idb_open_timeout'));
+      }, IDB_OPEN_TIMEOUT_MS);
+
+      let req;
+      try {
+        req = indexedDB.open(DB_NAME, DB_VERSION);
+      } catch (e) {
+        finish(e || new Error('idb_open_throw'));
+        return;
+      }
+
+      req.onupgradeneeded = (ev) => {
+        try {
+          console.log('[TFN] IndexedDB Upgrade → v' + DB_VERSION);
+          const database = ev.target.result;
+          if (!database.objectStoreNames.contains('prefs')) {
+            database.createObjectStore('prefs', { keyPath: 'scriptId' });
+          }
+          if (!database.objectStoreNames.contains('codeCache')) {
+            database.createObjectStore('codeCache', { keyPath: 'scriptId' });
+          }
+        } catch (e) {
+          console.warn('[TFN] IndexedDB Upgrade-Fehler', e);
+        }
       };
-      req.onerror = () => reject(req.error);
+      req.onblocked = () => {
+        console.warn(
+          '[TFN] IndexedDB open blocked – anderer Tab hält Verbindung. Warte max ' +
+            IDB_OPEN_TIMEOUT_MS + 'ms, dann Boot ohne IDB.'
+        );
+      };
+      req.onsuccess = (ev) => {
+        const database = ev.target.result;
+        try {
+          database.onversionchange = () => {
+            try { database.close(); } catch (_) {}
+            if (db === database) db = null;
+            console.warn('[TFN] IndexedDB versionchange – Verbindung geschlossen.');
+          };
+        } catch (_) {}
+        finish(null, database);
+      };
+      req.onerror = () => {
+        finish(req.error || new Error('idb_open_error'));
+      };
     });
+  }
+
+  function idbGetCode(scriptId) {
+    return new Promise((resolve) => {
+      if (!db || !db.objectStoreNames.contains('codeCache')) return resolve(null);
+      try {
+        const tx = db.transaction('codeCache', 'readonly');
+        const r = tx.objectStore('codeCache').get(Number(scriptId));
+        r.onsuccess = () => resolve(r.result || null);
+        r.onerror = () => resolve(null);
+      } catch (_) {
+        resolve(null);
+      }
+    });
+  }
+
+  function idbPutCode(entry) {
+    return new Promise((resolve) => {
+      if (!db || !db.objectStoreNames.contains('codeCache')) return resolve();
+      try {
+        const tx = db.transaction('codeCache', 'readwrite');
+        tx.objectStore('codeCache').put({
+          scriptId: Number(entry.scriptId),
+          version: String(entry.version || ''),
+          content: String(entry.content || ''),
+          cachedAt: Number(entry.cachedAt) || Date.now(),
+        });
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      } catch (_) {
+        resolve();
+      }
+    });
+  }
+
+  function sleepMs(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   function idbAllPrefs() {
@@ -297,10 +399,33 @@
         data: body != null ? JSON.stringify(body) : undefined,
         timeout: 20000,
         onload: (res) => {
+          const raw = String(res.responseText || '');
+          const trimmed = raw.trim();
+          // HTML-Fehlerseite (DOCTYPE / <br / PHP warning) nie als JSON/Content behandeln
+          if (/^</.test(trimmed) || /^<!DOCTYPE/i.test(trimmed)) {
+            const err = new Error('API lieferte HTML statt JSON (Route/Proxy/PHP-Fehler).');
+            err.status = res.status;
+            err.kind = 'http';
+            err.payload = { error: 'html_response', preview: trimmed.slice(0, 120) };
+            reject(err);
+            return;
+          }
           let data = null;
-          try { data = JSON.parse(res.responseText); } catch (_) {}
+          let parseOk = false;
+          try {
+            data = JSON.parse(raw);
+            parseOk = true;
+          } catch (_) {}
           if (res.status >= 200 && res.status < 300) {
-            resolve(data || {});
+            if (!parseOk || data == null || typeof data !== 'object') {
+              const err = new Error('API-Antwort kein JSON.');
+              err.status = res.status;
+              err.kind = 'http';
+              err.payload = { error: 'invalid_json', preview: trimmed.slice(0, 120) };
+              reject(err);
+              return;
+            }
+            resolve(data);
           } else {
             const err = new Error((data && data.message) || ('HTTP ' + res.status));
             err.status = res.status;
@@ -582,10 +707,28 @@
    * Im Seitenkontext ausführen (wie @grant none). Sandbox-new Function
    * sieht LSS-Globals nicht – deshalb unsafeWindow.eval.
    */
+  function looksLikeHtmlNotJs(code) {
+    const t = String(code || '').replace(/^\uFEFF/, '').trim();
+    if (!t) return true;
+    if (/^</.test(t)) return true;
+    if (/^<!DOCTYPE/i.test(t)) return true;
+    if (/^<html[\s>]/i.test(t)) return true;
+    return false;
+  }
+
   function executeScriptCode(code, label) {
     const body = prepareCode(code);
     if (!body.trim()) {
       console.warn('[TFN] Leerer Code nach Prepare:', label);
+      return false;
+    }
+    if (looksLikeHtmlNotJs(body)) {
+      console.error(
+        '[TFN] Exec verweigert – Content ist HTML/kein JS:',
+        label,
+        'preview=',
+        body.trim().slice(0, 80)
+      );
       return false;
     }
     try {
@@ -693,12 +836,202 @@
     publishManagerApi();
   }
 
+  /**
+   * Pref für kaputten Content (422/HTML) dauerhaft aus – einmal warnen, optional Sync.
+   * @param {number} sid
+   * @param {string} label
+   * @param {string} reason
+   */
+  async function disablePrefInvalidContent(sid, label, reason) {
+    const id = Number(sid);
+    let pref = prefs.find((p) => Number(p.scriptId) === id);
+    if (!pref) {
+      pref = { scriptId: id, enabled: false, config: {} };
+      prefs.push(pref);
+    }
+    const wasEnabled = !!pref.enabled;
+    pref.enabled = false;
+    draftEnabled[id] = false;
+    codeRam.delete(id);
+    try { await idbPutPref(pref); } catch (_) {}
+    if (!invalidContentWarned.has(id)) {
+      invalidContentWarned.add(id);
+      console.warn(
+        '[TFN] Pref deaktiviert (invalid content):',
+        label,
+        'id=' + id,
+        reason || '',
+        wasEnabled ? '(war enabled)' : ''
+      );
+    }
+    if (wasEnabled && syncEnabled) {
+      try { await pushServerPrefs(); } catch (_) {}
+    }
+  }
+
+  /** Enabled-Prefs deren Script nicht (mehr) im Katalog ist → skip + Pref aus. */
+  async function pruneStaleEnabledPrefs() {
+    const catalogIds = new Set(catalog.map((s) => Number(s.id)));
+    let pruned = 0;
+    for (const pref of prefs) {
+      const sid = Number(pref.scriptId);
+      if (!pref.enabled || catalogIds.has(sid)) continue;
+      pref.enabled = false;
+      draftEnabled[sid] = false;
+      try { await idbPutPref(pref); } catch (_) {}
+      pruned++;
+      if (!stalePrefWarned.has(sid)) {
+        stalePrefWarned.add(sid);
+        console.warn(
+          '[TFN] Stale Pref deaktiviert (Script nicht im Katalog / inaktiv): id=' + sid
+        );
+      }
+    }
+    if (pruned && syncEnabled) {
+      try { await pushServerPrefs(); } catch (_) {}
+    }
+    return pruned;
+  }
+
+  function isRateLimitError(e) {
+    if (!e) return false;
+    if (Number(e.status) === 429) return true;
+    const code = e.payload && e.payload.error;
+    return code === 'rate_limited';
+  }
+
+  function rememberCode(sid, version, rawContent) {
+    const id = Number(sid);
+    codeRam.set(id, rawContent);
+    idbPutCode({
+      scriptId: id,
+      version: version || '',
+      content: rawContent,
+      cachedAt: Date.now(),
+    }).catch(() => {});
+  }
+
+  /** IDB/RAM-Cache wenn Version zum Katalog passt und nicht zu alt. */
+  async function hydrateCodeFromCache(script) {
+    const sid = Number(script.id);
+    if (codeRam.has(sid)) return true;
+    const cached = await idbGetCode(sid);
+    if (!cached || !cached.content) return false;
+    const catVer = String(script.version || '');
+    if (catVer && String(cached.version || '') !== catVer) return false;
+    const age = Date.now() - Number(cached.cachedAt || 0);
+    if (age > CODE_CACHE_MAX_AGE_MS) return false;
+    if (looksLikeHtmlNotJs(cached.content)) return false;
+    codeRam.set(sid, cached.content);
+    return true;
+  }
+
+  /**
+   * Einzel-Content mit einmaligem 429-Backoff. Rate-Limit deaktiviert KEINE Prefs.
+   * @returns {Promise<string|null>}
+   */
+  async function fetchScriptContent(script) {
+    const sid = Number(script.id);
+    const label = script.slug || ('#' + sid);
+    const tryOnce = () => api('GET', '/api/scripts/' + sid + '/content');
+    let res;
+    try {
+      res = await tryOnce();
+    } catch (e) {
+      if (isRateLimitError(e)) {
+        console.warn('[TFN] Rate-Limit 429 – Retry in', RATE_LIMIT_RETRY_MS, 'ms:', label);
+        await sleepMs(RATE_LIMIT_RETRY_MS);
+        try {
+          res = await tryOnce();
+        } catch (e2) {
+          if (isRateLimitError(e2)) {
+            console.warn('[TFN] Rate-Limit weiter – Pref bleibt enabled:', label);
+            throw e2;
+          }
+          throw e2;
+        }
+      } else {
+        throw e;
+      }
+    }
+    const rawContent = res && typeof res.content === 'string' ? res.content : '';
+    if (!rawContent.trim()) {
+      console.error('[TFN] Content leer/ungültig:', label, res && res.error ? res : '(kein content)');
+      return null;
+    }
+    if (looksLikeHtmlNotJs(rawContent)) {
+      await disablePrefInvalidContent(
+        sid,
+        label,
+        'HTML statt JS (preview=' + rawContent.trim().slice(0, 60) + ')'
+      );
+      return null;
+    }
+    rememberCode(sid, (res && res.version) || script.version, rawContent);
+    return rawContent;
+  }
+
+  /** Bulk-Content; fehlende IDs bleiben ohne codeRam-Eintrag. */
+  async function fetchContentBulk(scripts) {
+    if (!scripts.length) return;
+    const ids = scripts.map((s) => Number(s.id));
+    const byId = new Map(scripts.map((s) => [Number(s.id), s]));
+    let res;
+    try {
+      res = await api('POST', '/api/scripts/content/bulk', { ids });
+    } catch (e) {
+      if (isRateLimitError(e)) {
+        console.warn('[TFN] Bulk Rate-Limit 429 – Retry einmal');
+        await sleepMs(RATE_LIMIT_RETRY_MS);
+        try {
+          res = await api('POST', '/api/scripts/content/bulk', { ids });
+        } catch (e2) {
+          console.warn('[TFN] Bulk weiterhin rate-limited – Fallback sequentiell');
+          return;
+        }
+      } else {
+        console.warn('[TFN] Bulk-Content fehlgeschlagen – Fallback sequentiell', e);
+        return;
+      }
+    }
+    const list = res && Array.isArray(res.scripts) ? res.scripts : [];
+    for (const item of list) {
+      const sid = Number(item && item.id);
+      const script = byId.get(sid);
+      const label = (script && script.slug) || (item && item.slug) || ('#' + sid);
+      if (!item || item.ok === false || item.error) {
+        const err = item && item.error;
+        if (err === 'rate_limited') {
+          console.warn('[TFN] Bulk Teil-429 – Pref bleibt enabled:', label);
+          continue;
+        }
+        if (err === 'invalid_content') {
+          await disablePrefInvalidContent(sid, label, 'bulk invalid_content');
+          continue;
+        }
+        if (err === 'not_found') {
+          await disablePrefInvalidContent(sid, label, 'bulk 404 not_found');
+          continue;
+        }
+        continue;
+      }
+      const rawContent = typeof item.content === 'string' ? item.content : '';
+      if (!rawContent.trim() || looksLikeHtmlNotJs(rawContent)) {
+        await disablePrefInvalidContent(sid, label, 'bulk HTML/leer');
+        continue;
+      }
+      rememberCode(sid, item.version || (script && script.version), rawContent);
+    }
+  }
+
   async function fetchAndRunEnabled() {
     if (killed) return;
     if (bootStatus !== 'ok' && bootStatus !== 'starting') {
       console.warn('[TFN] Kein Script-Lauf, Status:', bootStatus);
       return;
     }
+
+    await pruneStaleEnabledPrefs();
 
     const enabledIds = new Set(
       prefs.filter((p) => p.enabled).map((p) => Number(p.scriptId))
@@ -710,6 +1043,8 @@
       console.log('[TFN] Keine aktivierten Scripts (Prefs). UI-Blau ohne „Änderungen anwenden“ zählt nicht.');
     }
 
+    /** @type {object[]} */
+    const toFetch = [];
     for (const script of catalog) {
       const sid = Number(script.id);
       const label = script.slug || ('#' + sid);
@@ -718,24 +1053,60 @@
         console.warn('[TFN] Skip (match):', label, script.match_patterns, 'href=', location.href);
         continue;
       }
+      const hit = await hydrateCodeFromCache(script);
+      if (!hit) toFetch.push(script);
+    }
+
+    if (toFetch.length) {
+      await fetchContentBulk(toFetch);
+    }
+
+    for (const script of toFetch) {
+      const sid = Number(script.id);
+      if (codeRam.has(sid)) continue;
+      const label = script.slug || ('#' + sid);
       try {
-        if (!codeRam.has(sid)) {
-          const res = await api('GET', '/api/scripts/' + sid + '/content');
-          if (res && typeof res.content === 'string') {
-            codeRam.set(sid, res.content);
-          } else {
-            console.error('[TFN] Content leer/ungültig:', label, res);
-            continue;
-          }
+        await sleepMs(CONTENT_FETCH_GAP_MS);
+        await fetchScriptContent(script);
+      } catch (e) {
+        const errCode = e && e.payload && e.payload.error;
+        if (isRateLimitError(e)) {
+          // absichtlich kein disablePref
+          console.warn('[TFN] Fetch übersprungen (429 rate_limited), Pref bleibt:', label);
+          continue;
         }
-        const code = codeRam.get(sid);
-        if (!code) continue;
+        const isInvalidContent =
+          (e && Number(e.status) === 422) || errCode === 'invalid_content';
+        if (isInvalidContent) {
+          await disablePrefInvalidContent(
+            sid,
+            label,
+            'HTTP 422 ' + (errCode || 'invalid_content')
+          );
+          continue;
+        }
+        if (e && Number(e.status) === 404) {
+          await disablePrefInvalidContent(sid, label, 'HTTP 404 not_found');
+          continue;
+        }
+        console.error('[TFN] Fetch/Exec-Fehler', label, e);
+      }
+    }
+
+    for (const script of catalog) {
+      const sid = Number(script.id);
+      const label = script.slug || ('#' + sid);
+      if (!enabledIds.has(sid)) continue;
+      if (!urlMatches(script.match_patterns)) continue;
+      const code = codeRam.get(sid);
+      if (!code) continue;
+      try {
         if (executeScriptCode(code, label)) {
           active.push(sid);
           ran++;
         }
       } catch (e) {
-        console.error('[TFN] Fetch/Exec-Fehler', label, e);
+        console.error('[TFN] Exec-Fehler', label, e);
       }
     }
 
@@ -1440,7 +1811,8 @@
         config: p.config || {},
       }));
     } catch (e) {
-      console.warn('[TFN] IndexedDB auf Host-Seite:', e);
+      console.warn('[TFN] IndexedDB Host übersprungen', e && e.message ? e.message : e);
+      db = null;
       prefs = [];
     }
 
@@ -1524,6 +1896,8 @@
       return;
     }
 
+    console.log('[TFN] session/start vorbereiten · user_id=', user.user_id, '· v' + MANAGER_VERSION);
+
     try {
       await openDb();
       prefs = (await idbAllPrefs()).map((p) => ({
@@ -1532,7 +1906,9 @@
         config: p.config || {},
       }));
     } catch (e) {
-      console.error('[TFN] IndexedDB Fehler', e);
+      console.warn('[TFN] IndexedDB übersprungen (Boot geht weiter)', e && e.message ? e.message : e);
+      db = null;
+      prefs = Array.isArray(prefs) ? prefs : [];
     }
 
     // Profilmenü früh einhängen (auch bei Fehler später nutzbar)
